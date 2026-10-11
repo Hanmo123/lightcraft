@@ -354,9 +354,13 @@ fn overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(crate::i18n::tr("Overlay")).color(t.text_dim));
         let r = crate::widgets::dropdown(ui, "maskOverlayMode", view.label(), t.font(12.5), t.text_label);
-        egui::Popup::menu(&r).show(|ui| {
+        // A second memory-backed Popup replaces the settings popup. Submenus keep its
+        // lifetime and outside-click handling connected to their parent instead.
+        egui::containers::menu::SubMenu::new().show(ui, &r, |ui| {
             for v in MaskView::ALL {
-                if ui.selectable_label(v == view, v.label()).clicked() {
+                let option = ui.selectable_label(v == view, v.label());
+                register(ui.ctx(), format!("maskOverlayMode:{}", v.name()), option.rect);
+                if option.clicked() {
                     let _ = app.run("view.maskOverlayMode", json!({"mode": v.name()}));
                 }
             }
@@ -379,12 +383,21 @@ fn overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         });
     }
     if colored {
-        let mut color = app.ui.mask_overlay_color;
-        let response = ui.color_edit_button_srgb(&mut color);
+        let [red, green, blue] = app.ui.mask_overlay_color;
+        let mut color = egui::Color32::from_rgb(red, green, blue);
+        let (rect, response) = ui.allocate_exact_size(ui.spacing().interact_size, Sense::click());
+        ui.painter().rect_filled(rect.shrink(1.0), 2.0, color);
+        ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, if response.hovered() { t.text } else { t.button_border }), egui::StrokeKind::Inside);
+        response.widget_info(|| egui::WidgetInfo::new(egui::WidgetType::ColorButton));
         register(ui.ctx(), "maskOverlayCustomColor", response.rect);
-        if response.changed() {
-            let _ = app.run("view.maskOverlayColor", json!({"color": color}));
-        }
+        egui::containers::menu::SubMenu::new().show(ui, &response, |ui| {
+            ui.spacing_mut().slider_width = 275.0;
+            let picker = ui.scope(|ui| egui::color_picker::color_picker_color32(ui, &mut color, egui::color_picker::Alpha::Opaque));
+            register(ui.ctx(), "maskOverlayColorPicker", picker.response.rect);
+            if picker.inner {
+                let _ = app.run("view.maskOverlayColor", json!({"color": [color.r(), color.g(), color.b()]}));
+            }
+        });
     }
     let spec = ControlSpec {
         id: "ui.maskOverlayOpacity",

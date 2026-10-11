@@ -1538,6 +1538,57 @@ fn masking_component_selection_routes_brushes_and_settings_without_editing_the_p
 }
 
 #[test]
+fn masking_overlay_mode_menu_stays_open_and_selects_from_both_footers() {
+    use lightcraft_pipeline::MaskView;
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "brush"}));
+    let before = develop(&h);
+    let has = |h: &Headless, key: &str| h.app.widgets.iter().any(|(id, _)| id == key);
+    for floating in [false, true] {
+        exec(&mut h, "ui.maskPanel", json!({"floating": floating}));
+        for launcher in ["icon:maskOverlayOptions", "maskOverlaySwatch"] {
+            click(&mut h, launcher);
+            for mode in MaskView::ALL {
+                click(&mut h, "dropdown:maskOverlayMode");
+                for _ in 0..4 {
+                    h.step();
+                }
+                assert!(has(&h, "dropdown:maskOverlayMode"), "opening the mode menu must preserve its parent");
+                for option in MaskView::ALL {
+                    assert!(has(&h, &format!("maskOverlayMode:{}", option.name())), "all modes remain available");
+                }
+                click(&mut h, &format!("maskOverlayMode:{}", mode.name()));
+                h.step();
+                assert_eq!(h.app.ui.mask_overlay_mode, mode.name());
+                assert!(has(&h, "dropdown:maskOverlayMode"), "selection keeps overlay settings open");
+            }
+            exec(&mut h, "view.maskOverlayMode", json!({"mode": "color"}));
+            exec(&mut h, "view.maskOverlayColor", json!({"color": [230, 30, 40]}));
+            click(&mut h, "maskOverlayCustomColor");
+            for _ in 0..4 {
+                h.step();
+            }
+            assert!(has(&h, "maskOverlayColorPicker"), "custom colour picker also preserves its parent");
+            let r = h.request("ui.clickWidget", json!({"id": "maskOverlayColorPicker", "fx": 0.4, "fy": 0.4}), T);
+            assert_eq!(r["ok"], true, "{r}");
+            assert_ne!(h.app.ui.mask_overlay_color, [230, 30, 40]);
+            assert!(has(&h, "maskOverlayColorPicker"), "colour editing keeps the picker open");
+            assert!(has(&h, "dropdown:maskOverlayMode"));
+            h.request("ui.key", json!({"key": "Escape"}), T);
+            assert!(!has(&h, "dropdown:maskOverlayMode"));
+            assert_eq!(h.app.ui.view, crate::state::ViewMode::Detail, "Escape dismisses the popup, not the photo");
+            click(&mut h, launcher);
+            click(&mut h, "dropdown:maskOverlayMode");
+            h.step();
+            click(&mut h, "label:maskAdjustments");
+            h.step();
+            assert!(!has(&h, "dropdown:maskOverlayMode"), "outside click dismisses both menus");
+            assert_eq!(develop(&h), before, "overlay controls do not paint through or edit the photo");
+        }
+    }
+}
+
+#[test]
 fn masking_list_floats_moves_docks_and_preserves_overlay_preferences_without_photo_edits() {
     let mut h = detail("panel.masking");
     let has = |h: &Headless, key: &str| h.app.widgets.iter().any(|(id, _)| id == key);

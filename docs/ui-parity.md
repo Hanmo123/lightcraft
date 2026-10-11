@@ -64,7 +64,9 @@ indicators use separate rounded-square badges before the component name, with de
 Renaming a mask or component replaces only its name with an input. Mask thumbnails and
 visibility/menu buttons, component icons and operation badges, and row heights stay in place.
 The list footer contains the overlay checkbox and colour/options popups (custom colour, opacity,
-visualization mode and pins). These display/layout preferences do not add photo undo steps.
+visualization mode and pins). Mode choices and the custom colour picker are child menus, so
+opening or using them preserves the settings popup; Escape or an outside click dismisses it.
+These display/layout preferences do not add photo undo steps.
 
 Mask rows show the actual composite coverage as white on black, with grey feathered edges,
 fitted to the edited photo’s aspect ratio. Background renders share the canvas mask pipeline
@@ -111,5 +113,6 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-11 | minor | #450: fix overlay mode/custom-colour submenus closing the settings popup; verify both launchers and layouts |
 | 2026-10-11 | minor | #450: embedded/floating list, selected-component settings, overlay footer and remaining masking gaps |
 | 2026-10-10 | major | Created: measured command and shortcut counts, assessment by area, estimates; moved the shortcut conflicts section here from the checklist |
