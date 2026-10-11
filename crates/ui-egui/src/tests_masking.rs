@@ -49,6 +49,66 @@ fn brush_at(h: &mut Headless, x: f64, y: f64) {
     pointer(h, json!([{"kind": "down", "x": x, "y": y}, {"kind": "up", "x": x, "y": y}]));
 }
 
+#[test]
+fn masking_thumbnails_show_composite_coverage_and_follow_edits() {
+    fn thumbnail(h: &mut Headless, mask: u32) -> (u64, egui::ColorImage) {
+        assert!(h.settle(SETTLE));
+        let photo = h.app.session.active().unwrap();
+        let key = h.app.session.mask_thumbnail_job(photo, mask, 96).unwrap().key;
+        let tex = h.app.renderer.textures.get(&crate::render::Slot::Variant(key)).expect("mask coverage texture rendered");
+        let pixels = tex.pixels.as_deref().unwrap().clone();
+        assert!(pixels.pixels.iter().all(|p| p.r() == p.g() && p.g() == p.b() && p.a() == 255));
+        let rect = h.app.widgets.iter().find(|(id, _)| id == &format!("maskThumbnailImage:{mask}")).unwrap().1;
+        assert!(
+            (rect.aspect_ratio() - pixels.size[0] as f32 / pixels.size[1] as f32).abs() < 0.01,
+            "fit the whole photo without stretching/cropping"
+        );
+        // The row actually paints the coverage texture, rather than retaining a type icon.
+        let screen = h.paint();
+        let center = screen[(rect.center().x as usize, rect.center().y as usize)];
+        let center_alpha = pixels[(pixels.size[0] / 2, pixels.size[1] / 2)].r();
+        assert!(center.r().abs_diff(center_alpha) <= 3, "{center:?} vs {center_alpha}");
+        (key, pixels)
+    }
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind":"radial", "center":[0.5,0.5], "rx":0.3,"ry":0.3,"feather":30}));
+    let mask = h.app.session.active_mask.unwrap();
+    let (key, radial) = thumbnail(&mut h, mask);
+    assert_eq!(radial[(radial.size[0] / 2, radial.size[1] / 2)].r(), 255);
+    assert_eq!(radial[(0, 0)].r(), 0);
+    assert!(radial.pixels.iter().any(|p| p.r() > 10 && p.r() < 240), "feather has intermediate coverage");
+    exec(&mut h, "mask.addComponent", json!({"kind":"brush", "op":"subtract"}));
+    exec(&mut h, "mask.brushStroke", json!({"points":[[0.5,0.5]], "size":0.12,"feather":0,"flow":100,"density":100}));
+    let (painted_key, painted) = thumbnail(&mut h, mask);
+    assert_ne!(key, painted_key);
+    assert_eq!(painted[(painted.size[0] / 2, painted.size[1] / 2)].r(), 0, "subtract brush removes the center");
+    assert_ne!(painted, radial);
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(thumbnail(&mut h, mask).1, radial);
+    exec(&mut h, "edit.redo", json!({}));
+    assert_eq!(thumbnail(&mut h, mask).1, painted);
+    exec(&mut h, "mask.addComponent", json!({"kind":"linear", "op":"intersect", "start":[0.0,0.3],"end":[0.0,0.7]}));
+    let (_, intersected) = thumbnail(&mut h, mask);
+    assert!(intersected.pixels.iter().zip(&painted.pixels).any(|(a, b)| a.r() < b.r()));
+    assert!(intersected.pixels.iter().zip(&painted.pixels).all(|(a, b)| a.r() <= b.r()));
+    exec(&mut h, "mask.invert", json!({}));
+    let (_, inverted) = thumbnail(&mut h, mask);
+    assert!(intersected.pixels.iter().zip(&inverted.pixels).all(|(a, b)| (u16::from(a.r()) + u16::from(b.r())).abs_diff(255) <= 1));
+    exec(&mut h, "mask.visible", json!({"visible":false}));
+    assert_eq!(thumbnail(&mut h, mask).1, inverted, "hidden mask still shows its range");
+    let before = develop(&h);
+    exec(&mut h, "ui.maskPanel", json!({"floating":true}));
+    exec(&mut h, "view.maskOverlay", json!({"show":false}));
+    exec(&mut h, "view.maskOverlayColor", json!({"color":"#00ff00","opacity":15}));
+    assert_eq!(thumbnail(&mut h, mask).1, inverted, "layout and overlay colour do not alter the thumbnail");
+    assert_eq!(develop(&h), before, "thumbnail requests never edit the photo");
+    let done = h.app.renderer.completed;
+    for _ in 0..10 {
+        h.step();
+    }
+    assert_eq!(h.app.renderer.completed, done, "unchanged thumbnails reuse their textures");
+}
+
 /// The first mask has direct choices; subsequent masks use the compact creation menu.
 #[test]
 fn create_mask_menu_opens_dismisses_and_creates_undoable_masks() {
@@ -174,6 +234,123 @@ fn subtract_brush_removes_sky_coverage_and_add_restores_it() {
     brush_at(&mut h, 0.25, 0.5);
     assert!(mask_coverage(&h, 0, 25, 50) > 0.99, "Add must be composed after Subtract");
     assert_eq!(develop(&h).masks[0].components.len(), 3);
+    h.settle(SETTLE);
+}
+
+#[test]
+fn masking_component_menus_offer_all_creation_kinds_and_preserve_the_operation() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "brush"}));
+    click(&mut h, "icon:maskCreate");
+    let mut creation_kinds: Vec<_> = h.app.widgets.iter().filter_map(|(id, _)| id.strip_prefix("maskNew:").map(str::to_owned)).collect();
+    creation_kinds.sort();
+    assert_eq!(creation_kinds.len(), 10);
+    h.request("ui.key", json!({"key": "Escape"}), T);
+    let original = develop(&h);
+    for op in ["add", "subtract", "intersect"] {
+        for kind in ["brush", "background", "colorRange", "linear", "radial", "sky", "subject", "luminanceRange"] {
+            match op {
+                "add" => click(&mut h, "button:maskPlus:1"),
+                "subtract" => click(&mut h, "button:maskMinus:1"),
+                _ => {
+                    click(&mut h, "button:componentMenu0");
+                    click(&mut h, "maskComponentMenu:0:intersect");
+                }
+            }
+            let prefix = format!("maskComp:{op}:");
+            let mut kinds: Vec<_> = h.app.widgets.iter().filter_map(|(id, _)| id.strip_prefix(&prefix).map(str::to_owned)).collect();
+            kinds.sort();
+            assert_eq!(kinds, creation_kinds, "{op} must offer every creatable kind");
+            click(&mut h, &format!("maskComp:{op}:{kind}"));
+            let after = develop(&h);
+            assert_eq!(after.masks.len(), 1);
+            assert_eq!(after.masks[0].components.len(), 2, "{op}/{kind} creates a component in the existing mask");
+            assert_eq!(after.masks[0].components[0], original.masks[0].components[0]);
+            let component = &after.masks[0].components[1];
+            assert_eq!(serde_json::to_value(component.op).unwrap(), op);
+            assert_eq!(serde_json::to_value(&component.shape).unwrap()["kind"], kind);
+            assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(1));
+            if ["brush", "linear", "radial", "colorRange"].contains(&kind) {
+                assert_eq!(h.app.ui.tool, kind, "the new component is ready for canvas input");
+            }
+            assert!(!h.app.widgets.iter().any(|(id, _)| id.starts_with("maskComp:")));
+            exec(&mut h, "edit.undo", json!({}));
+            assert_eq!(develop(&h), original);
+            exec(&mut h, "edit.redo", json!({}));
+            assert_eq!(develop(&h), after);
+            exec(&mut h, "edit.undo", json!({}));
+        }
+    }
+    h.settle(SETTLE);
+}
+
+#[test]
+fn masking_intersection_color_range_samples_the_selected_component_on_canvas() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "colorRange", "samples": [[50, 0, 0]]}));
+    click(&mut h, "button:componentMenu0");
+    click(&mut h, "maskComponentMenu:0:intersect");
+    click(&mut h, "maskComp:intersect:colorRange");
+    let before = develop(&h);
+    let samples = |d: &lightcraft_develop::DevelopSettings| {
+        let MaskShape::ColorRange { samples, .. } = &d.masks[0].components[1].shape else { panic!("colour range") };
+        samples.clone()
+    };
+    brush_at(&mut h, 0.4, 0.3);
+    let picked = develop(&h);
+    assert_eq!(samples(&picked).len(), 1, "clicking the photo must sample the new intersection");
+    assert_eq!(picked.masks[0].components[0], before.masks[0].components[0], "the earlier colour range stays unchanged");
+    let r = h.request("ui.pointer", json!({"shift": true, "events": [{"kind": "down", "x": 0.7, "y": 0.7}, {"kind": "up", "x": 0.7, "y": 0.7}]}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let added = develop(&h);
+    assert_eq!(samples(&added).len(), 2, "Shift-click adds a sample to the selected component");
+    assert_eq!(added.masks[0].components[0], before.masks[0].components[0]);
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(develop(&h), picked);
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(develop(&h), before);
+    exec(&mut h, "edit.redo", json!({}));
+    exec(&mut h, "edit.redo", json!({}));
+    assert_eq!(develop(&h), added);
+    h.settle(SETTLE);
+}
+
+#[test]
+fn intersect_brush_keeps_only_painted_overlap_and_supports_erase_and_undo() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "radial", "rx": 0.2, "ry": 0.2, "feather": 0}));
+    let original = develop(&h);
+    h.app.ui.brush_erase = true;
+    h.app.ui.mask_overlay = false;
+    exec(&mut h, "mask.brushSettings", json!({"size": 0.1, "feather": 0, "flow": 100, "density": 100}));
+    click(&mut h, "button:componentMenu0");
+    click(&mut h, "maskComponentMenu:0:intersect");
+    click(&mut h, "maskComp:intersect:brush");
+    assert_eq!(h.app.ui.tool, "brush");
+    assert!(!h.app.ui.brush_erase);
+    assert!(h.app.ui.mask_overlay);
+    assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(1));
+    assert_eq!(develop(&h).masks[0].components[1].op, lightcraft_develop::MaskOp::Intersect);
+    assert!(!h.app.widgets.iter().any(|(id, _)| id.starts_with("maskComp:")), "selection closes the menu");
+    brush_at(&mut h, 0.5, 0.5);
+    assert!(mask_coverage(&h, 0, 50, 50) > 0.99, "paint inside the original mask stays selected");
+    assert!(mask_coverage(&h, 0, 62, 50) < 0.01, "unpainted area of the original mask is excluded");
+    let painted = develop(&h);
+    brush_at(&mut h, 0.1, 0.1);
+    assert!(mask_coverage(&h, 0, 10, 10) < 0.01, "painting outside the original mask cannot expand it");
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(develop(&h), painted);
+    exec(&mut h, "mask.brushSettings", json!({"erase": true}));
+    brush_at(&mut h, 0.5, 0.5);
+    assert!(mask_coverage(&h, 0, 50, 50) < 0.01, "Erase removes paint within the intersection");
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(develop(&h), painted);
+    exec(&mut h, "edit.undo", json!({}));
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(develop(&h), original, "undo removes the stroke and new component separately");
+    exec(&mut h, "edit.redo", json!({}));
+    exec(&mut h, "edit.redo", json!({}));
+    assert_eq!(develop(&h), painted);
     h.settle(SETTLE);
 }
 
@@ -1188,6 +1365,128 @@ fn ai_masks_without_the_model_offer_the_download() {
     assert!(e.starts_with(lightcraft_engine::segment::NOT_INSTALLED), "{e}");
     assert!(develop(&h).masks.is_empty());
     assert!(t.elapsed() < SETTLE, "{:?}", t.elapsed());
+}
+
+#[test]
+fn masking_component_move_menu_keeps_selection_and_undo_targets() {
+    for floating in [false, true] {
+        let mut h = detail("panel.masking");
+        exec(&mut h, "mask.add", json!({"kind": "sky"}));
+        exec(&mut h, "mask.addComponent", json!({"kind": "brush", "op": "subtract"}));
+        exec(&mut h, "mask.brushSettings", json!({"size": 0.1, "feather": 0, "flow": 100, "density": 100}));
+        brush_at(&mut h, 0.5, 0.5);
+        exec(&mut h, "mask.addComponent", json!({"kind": "radial", "op": "intersect"}));
+        exec(&mut h, "ui.maskPanel", json!({"floating": floating}));
+        click(&mut h, "component:1");
+        let before = develop(&h);
+        assert!(mask_coverage(&h, 0, 50, 50) < 0.01);
+        click(&mut h, "button:componentMenu1");
+        click(&mut h, "maskComponentMove:1:up");
+        let mut moved = before.clone();
+        moved.masks[0].components.swap(0, 1);
+        assert_eq!(develop(&h), moved);
+        assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(0));
+        assert_eq!(h.app.ui.tool, "brush");
+        assert!(mask_coverage(&h, 0, 50, 50) > 0.99, "move changes the actual composition order");
+        exec(&mut h, "edit.undo", json!({}));
+        assert_eq!(develop(&h), before);
+        assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(1));
+        exec(&mut h, "edit.redo", json!({}));
+        assert_eq!(develop(&h), moved);
+        assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(0));
+        brush_at(&mut h, 0.25, 0.5);
+        let painted = develop(&h);
+        let MaskShape::Brush { strokes } = &painted.masks[0].components[0].shape else { panic!("brush") };
+        assert_eq!(strokes.len(), 2, "canvas edits follow the moved component");
+        assert_eq!(painted.masks[0].components[1..], moved.masks[0].components[1..]);
+        exec(&mut h, "edit.undo", json!({}));
+        click(&mut h, "button:componentMenu0");
+        click(&mut h, "maskComponentMove:0:up");
+        assert_eq!(develop(&h), moved, "Move Up is disabled at the top");
+        h.request("ui.key", json!({"key": "Escape"}), T);
+        for from in [0, 1] {
+            click(&mut h, &format!("button:componentMenu{from}"));
+            click(&mut h, &format!("maskComponentMove:{from}:down"));
+            assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(from + 1));
+            assert_eq!(h.app.ui.tool, "brush");
+        }
+        let bottom = develop(&h);
+        click(&mut h, "button:componentMenu2");
+        click(&mut h, "maskComponentMove:2:down");
+        assert_eq!(develop(&h), bottom, "Move Down is disabled at the bottom");
+        h.request("ui.key", json!({"key": "Escape"}), T);
+        // Moving another component across the selection preserves the selected brush.
+        exec(&mut h, "mask.component", json!({"component": 1, "action": "move", "delta": 1}));
+        assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(1));
+        assert_eq!(h.app.ui.tool, "brush");
+        h.settle(SETTLE);
+    }
+}
+
+#[test]
+fn masking_delete_keys_respect_component_and_mask_selection() {
+    for floating in [false, true] {
+        for key in ["Backspace", "Delete"] {
+            let mut h = detail("panel.masking");
+            exec(&mut h, "mask.add", json!({"kind": "radial", "name": "Keep"}));
+            exec(&mut h, "mask.add", json!({"kind": "linear", "name": "Sky"}));
+            exec(&mut h, "mask.addComponent", json!({"kind": "brush", "op": "subtract"}));
+            exec(&mut h, "mask.addComponent", json!({"kind": "radial", "op": "intersect"}));
+            exec(&mut h, "ui.maskPanel", json!({"floating": floating}));
+            let before = develop(&h);
+            // Middle, first and last components must each be independently deletable.
+            for component in [1, 0, 2] {
+                click(&mut h, &format!("component:{component}"));
+                let r = h.request("ui.key", json!({"key": key}), T);
+                assert_eq!(r["ok"], true, "{r}");
+                let mut expected = before.clone();
+                expected.masks[1].components.remove(component);
+                assert_eq!(develop(&h), expected, "{key}, floating={floating}: delete only component {component}");
+                assert_eq!(h.app.session.active_mask, Some(2));
+                exec(&mut h, "edit.undo", json!({}));
+                assert_eq!(develop(&h), before);
+                exec(&mut h, "edit.redo", json!({}));
+                assert_eq!(develop(&h), expected);
+                exec(&mut h, "edit.undo", json!({}));
+            }
+            click(&mut h, "mask:2");
+            assert!(h.app.ui.mask_component.is_none(), "clicking the parent selects the whole mask");
+            h.request("ui.key", json!({"key": key}), T);
+            assert_eq!(develop(&h).masks, vec![before.masks[0].clone()]);
+            assert!(h.app.ui.mask_component.is_none(), "whole-mask deletion keeps the remaining mask selected as a whole");
+            exec(&mut h, "edit.undo", json!({}));
+            assert_eq!(develop(&h), before);
+            exec(&mut h, "mask.select", json!({"id": 1}));
+            click(&mut h, "component:0");
+            h.request("ui.key", json!({"key": key}), T);
+            assert_eq!(develop(&h).masks, vec![before.masks[1].clone()], "deleting a sole component removes only its empty mask");
+            exec(&mut h, "edit.undo", json!({}));
+            assert_eq!(develop(&h), before);
+            exec(&mut h, "mask.select", json!({"id": null}));
+            h.request("ui.key", json!({"key": key}), T);
+            assert_eq!(develop(&h), before);
+            let photo = h.app.session.active().unwrap();
+            assert!(!h.app.session.catalog.photo(photo).unwrap().deleted, "retouching never deletes the photo");
+            h.settle(SETTLE);
+        }
+    }
+}
+
+#[test]
+fn masking_backspace_edits_a_component_name_without_deleting_it() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "linear"}));
+    exec(&mut h, "mask.addComponent", json!({"kind": "brush", "op": "subtract"}));
+    let before = develop(&h);
+    let r = h.request("ui.clickWidget", json!({"id": "component:1", "count": 2}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(h.app.ui.renaming_component.is_some());
+    h.request("ui.key", json!({"key": "End"}), T);
+    h.request("ui.key", json!({"key": "Backspace"}), T);
+    assert_eq!(develop(&h), before, "the text field owns Backspace");
+    h.request("ui.key", json!({"key": "Escape"}), T);
+    assert_eq!(develop(&h), before, "cancelling the rename preserves all components");
+    h.settle(SETTLE);
 }
 
 #[test]

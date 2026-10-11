@@ -878,6 +878,49 @@ fn quick_develop_adds_to_each_photo() {
 }
 
 #[test]
+fn mask_components_move_without_changing_content_and_undo_once() {
+    let mut s = demo();
+    s.execute("mask.add", &json!({"kind": "sky", "name": "Untouched"})).unwrap();
+    s.execute("mask.add", &json!({"kind": "linear"})).unwrap();
+    s.execute("mask.addComponent", &json!({"kind": "brush", "op": "subtract"})).unwrap();
+    s.execute("mask.component", &json!({"component": 1, "action": "rename", "name": "Cleanup"})).unwrap();
+    s.execute("mask.component", &json!({"component": 1, "action": "invert"})).unwrap();
+    s.execute("mask.addComponent", &json!({"kind": "radial", "op": "intersect"})).unwrap();
+    let before = active_dev(&s);
+    let undo = s.undo.len();
+    let r = s.execute("mask.component", &json!({"component": 1, "action": "move", "delta": -1})).unwrap();
+    assert_eq!((r["from"].as_u64(), r["to"].as_u64()), (Some(1), Some(0)));
+    let mut moved = before.clone();
+    moved.masks[1].components.swap(0, 1);
+    assert_eq!(active_dev(&s), moved);
+    assert_eq!(s.undo.len(), undo + 1);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s), before);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s), moved);
+    s.execute("mask.component", &json!({"component": 0, "action": "move", "delta": 1})).unwrap();
+    assert_eq!(active_dev(&s), before);
+    let undo = s.undo.len();
+    for (component, delta) in [(0, -1), (2, 1)] {
+        let r = s.execute("mask.component", &json!({"component": component, "action": "move", "delta": delta})).unwrap();
+        assert_eq!(r["from"], r["to"]);
+    }
+    for params in [
+        json!({"component": 1, "action": "move"}),
+        json!({"component": 1, "action": "move", "delta": 0}),
+        json!({"component": 1, "action": "move", "delta": 2}),
+        json!({"component": 1, "action": "move", "delta": "up"}),
+        json!({"component": 1, "action": "move", "delta": i64::MIN}),
+        json!({"component": u64::MAX, "action": "move", "delta": -1}),
+        json!({"id": 999, "component": 0, "action": "move", "delta": 1}),
+    ] {
+        assert!(s.execute("mask.component", &params).is_err(), "{params}");
+    }
+    assert_eq!(active_dev(&s), before);
+    assert_eq!(s.undo.len(), undo, "bounds and invalid moves add no history");
+}
+
+#[test]
 fn mask_components_invert_duplicate_rename_change_mode_and_delete() {
     use lightcraft_develop::MaskOp;
     let mut s = demo();

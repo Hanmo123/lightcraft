@@ -335,7 +335,8 @@ pub struct UiState {
     /// The mask list is embedded above its settings by default, or detached within the app.
     pub mask_panel_floating: bool,
     pub mask_panel_rect: Option<[f32; 4]>,
-    /// Current component belongs to a particular photo and mask; never restore it from preferences.
+    /// Explicit component selection, scoped to photo/mask; None selects the whole active mask.
+    /// Never restore it from preferences.
     #[serde(skip)]
     pub mask_component: Option<(lightcraft_catalog::PhotoId, u32, usize)>,
     pub brush_density: f32,

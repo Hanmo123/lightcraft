@@ -151,6 +151,29 @@ fn find(masks: &mut [Mask], id: u32, c: &str) -> Result<usize> {
     masks.iter().position(|m| m.id == id).ok_or_else(|| bad(c, format!("no mask {id}")))
 }
 
+fn move_component(s: &mut Session, p: &Value, mask: u32, from: usize) -> Result<Value> {
+    let c = "mask.component";
+    let delta = p.get("delta").and_then(Value::as_i64).filter(|d| matches!(d, -1 | 1)).ok_or_else(|| bad(c, "move needs delta -1 or 1"))?;
+    let photo = s.active().ok_or_else(|| bad(c, "no active photo"))?;
+    let d = s.develop_of(photo).ok_or_else(|| bad(c, "no active photo"))?;
+    let components = &d.masks.iter().find(|m| m.id == mask).ok_or_else(|| bad(c, "no such mask"))?.components;
+    components.get(from).ok_or_else(|| bad(c, "no such component"))?;
+    let to = if delta < 0 { from.checked_sub(1) } else { from.checked_add(1).filter(|i| *i < components.len()) }.unwrap_or(from);
+    if to != from {
+        // A click job stores a component index; don't let its result land on a different Object.
+        if s.segmenter.pending_clicks().is_some_and(|q| q.photo == photo && q.mask == mask && (q.comp == from || q.comp == to)) {
+            return Err(bad(c, "wait for the object selection to finish before moving this component"));
+        }
+        masks_edit(s, c, "Move Component", |masks, _| {
+            let components = &mut masks.iter_mut().find(|m| m.id == mask).ok_or_else(|| bad(c, "no such mask"))?.components;
+            let pair = components.get_mut(from.min(to)..=from.max(to)).ok_or_else(|| bad(c, "no such component"))?;
+            pair.rotate_left(1);
+            Ok(())
+        })?;
+    }
+    Ok(json!({"activeMask": s.active_mask, "mask": mask, "from": from, "to": to}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -604,13 +627,20 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Mask Component",
             [],
             None,
-            "{id?, component: index, action: invert|duplicate|delete|rename|op, name? (rename; empty clears), op?: add|subtract|intersect} — one component of a mask (deleting the last one deletes the mask)",
+            "{id?, component: index, action: invert|duplicate|delete|rename|op|move, name? (rename; empty clears), op?: add|subtract|intersect, delta?: -1|1 (move)} — one component of a mask; move returns {mask, from, to}, boundaries are a no-op; deleting the last component deletes the mask",
             has_active,
             |s, p| {
                 let c = "mask.component";
                 let mid = mask_id(p, s.active_mask, c)?;
-                let k = p.get("component").and_then(Value::as_u64).ok_or_else(|| bad(c, "missing component"))? as usize;
+                let k = p
+                    .get("component")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| usize::try_from(v).ok())
+                    .ok_or_else(|| bad(c, "invalid component index"))?;
                 let action = str_param(p, "action").ok_or_else(|| bad(c, "missing action"))?.to_string();
+                if action == "move" {
+                    return move_component(s, p, mid, k);
+                }
                 let op: Option<MaskOp> = match p.get("op") {
                     Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| bad(c, e.to_string()))?),
                     None => None,
@@ -621,7 +651,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     "delete" => "Delete Component",
                     "rename" => "Rename Component",
                     "op" => "Change Component Mode",
-                    a => return Err(bad(c, format!("unknown action {a:?} (invert|duplicate|delete|rename|op)"))),
+                    a => return Err(bad(c, format!("unknown action {a:?} (invert|duplicate|delete|rename|op|move)"))),
                 };
                 masks_edit(s, c, label, |masks, active| {
                     let i = find(masks, mid, c)?;

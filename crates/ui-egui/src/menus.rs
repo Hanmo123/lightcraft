@@ -856,7 +856,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                     app.ui.tool = "guidedUpright".into();
                 }
                 "brush" => {
-                    // A new mask and Add/Subtract are selection operations, not the brush's
+                    // A new mask and Add/Subtract/Intersect are selection operations, not the brush's
                     // Erase mode. Paint positively into a component with the requested op.
                     let create = if p.get("new").and_then(Value::as_bool) == Some(true) {
                         Some(app.run("mask.add", json!({"kind": "brush"})))

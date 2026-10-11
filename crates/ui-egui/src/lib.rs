@@ -421,9 +421,14 @@ impl LightcraftApp {
             }
             return r;
         }
+        let mask_history_before = if matches!(id, "edit.undo" | "edit.redo") && self.ui.mask_component.is_some() {
+            self.session.active().and_then(|photo| self.session.develop_of(photo))
+        } else {
+            None
+        };
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
-        if r.is_ok() {
-            panels::masking::selection_changed(self, id, &params);
+        if let Ok(result) = &r {
+            panels::masking::selection_changed(self, id, &params, result, mask_history_before.as_deref());
         }
         if r.is_ok() && id == "mask.adjust" {
             // Judge local adjustments on the photo, without the selection overlay obscuring them.

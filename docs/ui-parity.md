@@ -47,17 +47,31 @@ floats it beside those settings; drag the title to move it, resize its corner, a
 icon or **Dock to panel** to embed it again. Placement and overlay preferences are saved. With no
 masks, creation choices remain directly visible in the right panel; subsequent creation uses +.
 
-Selecting a component highlights its row and shows its tool controls on the right. Brush strokes,
+Selecting a component highlights its row and shows its tool controls on the right. Backspace/Delete
+removes only that component; selecting the parent mask row makes deletion remove the whole mask.
+Deleting the last component removes its empty mask, and each deletion can be undone. Component
+menus also offer Move Up/Down, disabled at the list boundaries. Moving changes the actual
+composition order while preserving the component’s contents and selection, including undo/redo. Brush strokes,
 Object clicks and colour sampling target that component; brush Size, Feather, Flow, Density,
 Add/Erase and Auto Mask apply to subsequent strokes. Add/Subtract occupy equal halves of the
 selected mask’s action row, with larger hit areas and spacing above. Component settings lead
-directly into the local adjustment sliders, without a duplicate mask-name/invert row.
+into the local adjustment sliders under a small **Mask Adjustments** heading, without a
+duplicate mask-name/invert row. Add, Subtract and Intersect with offer the same ten types as
+new-mask creation, with localized labels. An intersection brush keeps only painted overlap;
+Erase removes paint from that brush component. Color Range samples the selected component
+when clicking the photo in the Masking panel; Shift-click adds a sample. Subtract and Intersect
+indicators use separate rounded-square badges before the component name, with descriptive hover text.
+Renaming a mask or component replaces only its name with an input. Mask thumbnails and
+visibility/menu buttons, component icons and operation badges, and row heights stay in place.
 The list footer contains the overlay checkbox and colour/options popups (custom colour, opacity,
 visualization mode and pins). These display/layout preferences do not add photo undo steps.
 
-The mask row uses original type icons; actual matte thumbnails, drag-to-reorder, A/B brushes,
-pressure, live-preview/stationary accumulation and the rest of Camera Raw's gesture details remain
-open. This is a layout and component-targeting step, not a claim of full visual/interaction parity.
+Mask rows show the actual composite coverage as white on black, with grey feathered edges,
+fitted to the edited photo’s aspect ratio. Background renders share the canvas mask pipeline
+(add/subtract/intersect, inversion, range and AI masks), use a separate thumbnail cache, and
+refresh after edits and undo/redo. Hidden masks retain their range preview, independent of
+overlay colour/opacity. Component rows keep their original type icons. Drag-to-reorder, A/B
+brushes, pressure, live-preview/stationary accumulation and broader gesture parity remain open.
 
 ## Shortcuts
 

@@ -13,7 +13,7 @@ use crate::theme::Tokens;
 use crate::widgets::{divider, icon_button, one_line, register, slider, text_button};
 
 mod workspace;
-pub(crate) use workspace::{command as workspace_command, floating, selection_changed, tool_component};
+pub(crate) use workspace::{command as workspace_command, floating, selected_component, selection_changed, tool_component};
 
 const fn spec(id: &'static str, label: &'static str, min: f64, max: f64, step: f64, decimals: u8, track: Track) -> ControlSpec {
     ControlSpec { id, label, section: Section::Light, min, max, default: 0.0, step, decimals, track }
@@ -129,6 +129,10 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         }
     }
     divider(ui);
+    egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 12, bottom: 8 }).show(ui, |ui| {
+        let title = ui.label(egui::RichText::new(crate::i18n::tr("Mask Adjustments")).font(t.semibold(13.0)));
+        register(ui.ctx(), "label:maskAdjustments", title.rect);
+    });
     for s in LOCAL {
         let v = local_get(&m.adjust, s.id);
         let out = slider(ui, s, v, true, None);
@@ -235,21 +239,24 @@ fn create_mask(app: &mut LightcraftApp, ctx: &egui::Context, kind: &str) {
     }
 }
 
+/// Every creatable kind also supports Add, Subtract and Intersect components.
+const MASK_KINDS: &[(&str, &str)] = &[
+    ("object", "Object"),
+    ("prompt", "Describe"),
+    ("subject", "Subject"),
+    ("sky", "Sky"),
+    ("background", "Background"),
+    ("brush", "Brush"),
+    ("linear", "Linear Gradient"),
+    ("radial", "Radial Gradient"),
+    ("luminanceRange", "Luminance Range"),
+    ("colorRange", "Color Range"),
+];
+
 /// New masks share the existing command paths; opening or dismissing the menu changes no edits.
 fn create_menu(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     ui.set_min_width(180.0);
-    for (kind, label) in [
-        ("object", "Object"),
-        ("prompt", "Describe"),
-        ("subject", "Subject"),
-        ("sky", "Sky"),
-        ("background", "Background"),
-        ("brush", "Brush"),
-        ("linear", "Linear Gradient"),
-        ("radial", "Radial Gradient"),
-        ("luminanceRange", "Luminance Range"),
-        ("colorRange", "Color Range"),
-    ] {
+    for &(kind, label) in MASK_KINDS {
         if kind == "brush" || kind == "luminanceRange" {
             ui.separator();
         }
@@ -548,7 +555,7 @@ fn range_controls(app: &mut LightcraftApp, ui: &mut egui::Ui, comp: usize, shape
 /// The right-click / "…" menu of one component of the selected mask.
 fn component_row_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, mask: u32, k: usize, label: &str, count: usize) {
     let mut run = |ui: &mut egui::Ui, text: &str, p: serde_json::Value| {
-        if ui.button(text).clicked() {
+        if ui.button(crate::i18n::tr(text)).clicked() {
             let mut p = p;
             p["id"] = json!(mask);
             p["component"] = json!(k);
@@ -565,8 +572,21 @@ fn component_row_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, mask: u32, k: 
             }
         });
     }
-    ui.menu_button(crate::i18n::tr("Intersect with"), |ui| component_menu(app, ui, "intersect"));
-    ui.menu_button(crate::i18n::tr("Subtract"), |ui| component_menu(app, ui, "subtract"));
+    for (op, label) in [("intersect", "Intersect with"), ("subtract", "Subtract")] {
+        let menu = ui.menu_button(crate::i18n::tr(label), |ui| component_menu(app, ui, op));
+        register(ui.ctx(), format!("maskComponentMenu:{k}:{op}"), menu.response.rect);
+    }
+    ui.separator();
+    for (key, label, delta, enabled) in [("up", "Move Up", -1, k > 0), ("down", "Move Down", 1, k.saturating_add(1) < count)] {
+        let button = ui.add_enabled(enabled, egui::Button::new(crate::i18n::tr(label)));
+        register(ui.ctx(), format!("maskComponentMove:{k}:{key}"), button.rect);
+        if button.clicked() {
+            if let Err(e) = app.run("mask.component", json!({"id": mask, "component": k, "action": "move", "delta": delta})) {
+                app.toast(ui.ctx(), e);
+            }
+            ui.close();
+        }
+    }
     ui.separator();
     if ui.button(crate::i18n::tr("Rename…")).clicked() {
         app.ui.renaming_component = Some((mask, k, label.to_string()));
@@ -692,36 +712,26 @@ fn describe_field(app: &mut LightcraftApp, ui: &mut egui::Ui, new_mask: bool) {
 }
 
 fn component_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, op: &str) {
-    let b = ui.button(crate::i18n::tr("Object"));
-    register(ui.ctx(), format!("maskComp:{op}:object"), b.rect);
-    if b.clicked() {
-        start_object(app, ui.ctx(), op);
-    }
-    let b = ui.button(crate::i18n::tr("Describe…"));
-    register(ui.ctx(), format!("maskComp:{op}:prompt"), b.rect);
-    if b.clicked() {
-        start_describe(app, op);
-    }
-    for (kind, label) in [
-        ("brush", "Brush"),
-        ("linear", "Linear Gradient"),
-        ("radial", "Radial Gradient"),
-        ("sky", "Sky"),
-        ("subject", "Subject"),
-        ("luminanceRange", "Luminance Range"),
-    ] {
-        // painting only adds or erases
-        if kind == "brush" && op == "intersect" {
-            continue;
+    ui.set_min_width(180.0);
+    for &(kind, label) in MASK_KINDS {
+        if kind == "brush" || kind == "luminanceRange" {
+            ui.separator();
         }
-        let b = ui.button(label);
+        let label = if kind == "prompt" { "Describe…" } else { label };
+        let b = ui.add(egui::Button::new(crate::i18n::tr(label)).min_size(vec2(0.0, 26.0)));
         register(ui.ctx(), format!("maskComp:{op}:{kind}"), b.rect);
         if b.clicked() {
-            if kind == "brush" {
-                let _ = app.run("tool.brush", json!({"op": op}));
-            } else {
-                let _ = app.run("mask.addComponent", json!({"op": op, "kind": kind}));
+            match kind {
+                "object" => start_object(app, ui.ctx(), op),
+                "prompt" => start_describe(app, op),
+                "brush" => {
+                    let _ = app.run("tool.brush", json!({"op": op}));
+                }
+                _ => {
+                    let _ = app.run("mask.addComponent", json!({"op": op, "kind": kind}));
+                }
             }
+            ui.close();
         }
     }
 }

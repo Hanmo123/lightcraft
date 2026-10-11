@@ -1123,6 +1123,24 @@ fn general_cursor(app: &LightcraftApp, ui: &egui::Ui, resp: &egui::Response, img
     ui.ctx().set_cursor_icon(cursor);
 }
 
+fn color_range_interaction(app: &mut LightcraftApp, ui: &egui::Ui, resp: &egui::Response, map: &CanvasMap) {
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    // Click samples the selected colour-range component; Shift-click adds up to five samples.
+    if resp.clicked()
+        && let Some(q) = resp.interact_pointer_pos()
+    {
+        let n = map.norm(q);
+        let add = ui.input(|i| i.modifiers.shift);
+        if let Err(e) =
+            app.run("mask.sampleColor", json!({"x": n.x, "y": n.y, "add": add, "component": super::masking::tool_component(app, "colorRange")}))
+        {
+            app.toast(ui.ctx(), e);
+        }
+    }
+}
+
 fn general_interaction(
     app: &mut LightcraftApp,
     ui: &mut egui::Ui,
@@ -1148,18 +1166,7 @@ fn general_interaction(
         return;
     }
     if app.ui.tool == "colorRange" {
-        // click: sample the colour for the selected mask's colour range; ⇧-click adds (up to 5)
-        if resp.clicked()
-            && let Some(q) = resp.interact_pointer_pos()
-        {
-            let n = map.norm(q);
-            let add = ui.input(|i| i.modifiers.shift);
-            if let Err(e) =
-                app.run("mask.sampleColor", json!({"x": n.x, "y": n.y, "add": add, "component": super::masking::tool_component(app, "colorRange")}))
-            {
-                app.toast(ui.ctx(), e);
-            }
-        }
+        color_range_interaction(app, ui, resp, map);
         return;
     }
     if app.ui.tool == "pointColor" {
@@ -1639,6 +1646,10 @@ fn mask_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Respons
                 }
             }
         }
+    }
+    if app.ui.tool == "colorRange" {
+        color_range_interaction(app, ui, resp, map);
+        return;
     }
     // Object tool: a click includes what's under it, ⌥-click leaves it out
     if app.ui.tool == "object" {
