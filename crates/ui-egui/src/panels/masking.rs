@@ -12,6 +12,9 @@ use crate::icons::{Icon, paint};
 use crate::theme::Tokens;
 use crate::widgets::{divider, icon_button, one_line, register, slider, text_button};
 
+mod workspace;
+pub(crate) use workspace::{command as workspace_command, floating, selection_changed, tool_component};
+
 const fn spec(id: &'static str, label: &'static str, min: f64, max: f64, step: f64, decimals: u8, track: Track) -> ControlSpec {
     ControlSpec { id, label, section: Section::Light, min, max, default: 0.0, step, decimals, track }
 }
@@ -99,185 +102,42 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         });
         return;
     }
-    // mask list
-    egui::Frame::NONE.inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(crate::i18n::tr("Masks")).font(t.semibold(13.0)).color(t.text_label));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let plus = icon_button(ui, "maskCreate", Icon::Plus, vec2(24.0, 24.0), false, true, "Create New Mask");
-                egui::Popup::menu(&plus).show(|ui| create_menu(app, ui));
-                let on = app.ui.mask_overlay;
-                if icon_button(ui, "maskOverlay", Icon::Eye, vec2(24.0, 24.0), on, true, "Show overlay (O)").clicked() {
-                    app.ui.mask_overlay = !on;
-                }
-            });
+    if app.ui.mask_panel_floating {
+        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(24, 6)).show(ui, |ui| {
+            if text_button(ui, "maskPanelDock", crate::i18n::tr("Dock to panel"), false).clicked() {
+                let _ = app.run("ui.maskPanel", json!({"floating": false}));
+            }
         });
-        creation_status(app, ui);
-        let count = d.masks.len();
-        for (index, m) in d.masks.iter().enumerate() {
-            let sel = app.session.active_mask == Some(m.id);
-            if let Some((rid, name)) = app.ui.renaming_mask.as_mut().filter(|(rid, _)| *rid == m.id) {
-                // inline rename: Enter (or leaving the field) commits, Escape cancels
-                let rid = *rid;
-                let r = ui.add(egui::TextEdit::singleline(name).desired_width(ui.available_width()).id_salt(("maskRename", rid)));
-                register(ui.ctx(), format!("maskRename:{rid}"), r.rect);
-                if !r.has_focus() && !r.lost_focus() {
-                    r.request_focus();
-                }
-                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    app.ui.renaming_mask = None;
-                } else if r.lost_focus() {
-                    let name = name.trim().to_string();
-                    app.ui.renaming_mask = None;
-                    if !name.is_empty() && name != m.name {
-                        let _ = app.run("mask.rename", json!({"id": rid, "name": name}));
-                    }
-                }
-                continue;
-            }
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-            register(ui.ctx(), format!("mask:{}", m.id), r);
-            ui.painter().rect_filled(
-                r,
-                4.0,
-                if sel {
-                    t.tool_active
-                } else if resp.hovered() {
-                    t.hover.gamma_multiply(0.7)
-                } else {
-                    t.chrome
-                },
-            );
-            let icon = m.components.first().map(|c| kind_label(&c.shape).1).unwrap_or(Icon::Mask);
-            paint(ui.painter(), Rect::from_min_size(r.min + vec2(8.0, 7.0), vec2(16.0, 16.0)), icon, t.text_label);
-            // a long name is cut short (with …) before the eye, the full name on hover
-            let color = if m.visible { t.text } else { t.text_disabled };
-            let g = one_line(ui.painter(), &m.name, t.font(13.0), color, r.width() - 32.0 - 32.0);
-            let elided = g.elided;
-            let at = pos2(r.left() + 32.0, r.center().y - g.size().y / 2.0);
-            register(ui.ctx(), format!("maskName:{}", m.id), Rect::from_min_size(at, g.size()));
-            ui.painter().galley(at, g, color);
-            let resp = if elided { resp.on_hover_text(&m.name) } else { resp };
-            // show / hide on hover (and always while hidden)
-            // (the pointer test, not `hovered`: over the eye, the row itself no longer counts as hovered)
-            if ui.rect_contains_pointer(r) || !m.visible {
-                let er = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(22.0, 22.0));
-                register(ui.ctx(), format!("maskVisible:{}", m.id), er);
-                let eye = ui.interact(er, egui::Id::new(("maskVisible", m.id)), Sense::click());
-                paint(
-                    ui.painter(),
-                    er.shrink(3.0),
-                    if m.visible { Icon::Eye } else { Icon::EyeOff },
-                    if eye.hovered() { t.text } else { t.text_dim },
-                );
-                if eye.clicked() {
-                    let _ = app.run("mask.visible", json!({"id": m.id}));
-                }
-            }
-            if resp.clicked() {
-                let _ = app.run("mask.select", json!({"id": m.id}));
-            }
-            if resp.double_clicked() {
-                app.ui.renaming_mask = Some((m.id, m.name.clone()));
-            }
-            resp.context_menu(|ui| mask_menu(app, ui, m.id, &m.name, m.visible, index, count));
-            if sel {
-                // right under the selected mask: ＋ adds to it, − takes away from it (any mask
-                // type; Describe… opens its field here)
-                ui.horizontal(|ui| {
-                    ui.add_space(30.0);
-                    let plus = text_button(ui, &format!("maskPlus:{}", m.id), "+", false).on_hover_text(crate::i18n::tr("Add to this mask"));
-                    egui::Popup::menu(&plus).show(|ui| component_menu(app, ui, "add"));
-                    let minus = text_button(ui, &format!("maskMinus:{}", m.id), "−", false).on_hover_text(crate::i18n::tr("Subtract from this mask"));
-                    egui::Popup::menu(&minus).show(|ui| component_menu(app, ui, "subtract"));
-                });
-                describe_field(app, ui, false);
-            }
-        }
-        if !d.masks.is_empty() {
-            ui.add_space(6.0);
-            overlay_options(app, ui);
-        }
-    });
+    } else {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }).show(ui, |ui| {
+            workspace::list(app, ui, &d, false);
+        });
+    }
     let Some(mid) = app.session.active_mask else { return };
-    let Some(m) = d.masks.iter().find(|m| m.id == mid).cloned() else { return };
-    divider(ui);
-    egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 8, bottom: 8 }).show(ui, |ui| {
-        for (i, c) in m.components.iter().enumerate() {
-            let (kind, icon) = kind_label(&c.shape);
-            let label = c.name.clone().unwrap_or_else(|| match &c.shape {
-                MaskShape::Prompt { text, .. } => format!("“{text}”"),
-                _ => kind.to_string(),
+    let Some(m) = d.masks.iter().find(|m| m.id == mid) else { return };
+    if let Some(i) = workspace::component(app, m)
+        && let Some(c) = m.components.get(i)
+    {
+        divider(ui);
+        if matches!(c.shape, MaskShape::Brush { .. }) {
+            brush_settings(app, ui);
+        } else {
+            egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 10, bottom: 8 }).show(ui, |ui| {
+                ui.label(egui::RichText::new(crate::i18n::tr(kind_label(&c.shape).0)).font(t.semibold(13.0)));
+                range_controls(app, ui, i, &c.shape);
             });
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                paint(ui.painter(), r, icon, t.text_label);
-                let op = match c.op {
-                    lightcraft_develop::MaskOp::Add => "",
-                    lightcraft_develop::MaskOp::Subtract => "− ",
-                    lightcraft_develop::MaskOp::Intersect => "∩ ",
-                };
-                if let Some((_, _, name)) = app.ui.renaming_component.as_mut().filter(|(mid, k, _)| *mid == m.id && *k == i) {
-                    // inline rename: Enter (or leaving the field) commits, Escape cancels
-                    let r = ui.add(egui::TextEdit::singleline(name).desired_width(ui.available_width() - 30.0).id_salt(("compRename", m.id, i)));
-                    register(ui.ctx(), format!("componentRename:{i}"), r.rect);
-                    if !r.has_focus() && !r.lost_focus() {
-                        r.request_focus();
-                    }
-                    if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
-                        app.ui.renaming_component = None;
-                    } else if r.lost_focus() {
-                        let name = name.trim().to_string();
-                        app.ui.renaming_component = None;
-                        if Some(&name) != c.name.as_ref() {
-                            let _ = app.run("mask.component", json!({"id": m.id, "component": i, "action": "rename", "name": name}));
-                        }
-                    }
-                    return;
-                }
-                // a long name is cut short (with …) before the options button, not past the panel
-                let text = format!("{op}{label}{}", if c.invert { crate::i18n::tr(" (inverted)") } else { "" });
-                let room = (ui.available_width() - 30.0).max(0.0);
-                let resp = ui.scope(|ui| {
-                    ui.set_max_width(room);
-                    ui.add(egui::Label::new(text).truncate().sense(Sense::click()))
-                });
-                let resp = resp.inner;
-                register(ui.ctx(), format!("component:{i}"), resp.rect);
-                if resp.double_clicked() {
-                    app.ui.renaming_component = Some((m.id, i, label.clone()));
-                }
-                resp.context_menu(|ui| component_row_menu(app, ui, m.id, i, &label, m.components.len()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let more = ui.small_button("…").on_hover_text(crate::i18n::tr("Component options"));
-                    register(ui.ctx(), format!("button:componentMenu{i}"), more.rect);
-                    egui::Popup::menu(&more).show(|ui| component_row_menu(app, ui, m.id, i, &label, m.components.len()));
-                });
-            });
-            range_controls(app, ui, i, &c.shape);
         }
-        ui.add_space(6.0);
-        // wraps: the five actions are wider than a narrow panel
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            let add = text_button(ui, "maskAddComp", crate::i18n::tr("Add"), false);
-            egui::Popup::menu(&add).show(|ui| component_menu(app, ui, "add"));
-            let sub = text_button(ui, "maskSubComp", crate::i18n::tr("Subtract"), false);
-            egui::Popup::menu(&sub).show(|ui| component_menu(app, ui, "subtract"));
-            let int = text_button(ui, "maskIntComp", crate::i18n::tr("Intersect"), false);
-            egui::Popup::menu(&int).show(|ui| component_menu(app, ui, "intersect"));
-            if text_button(ui, "maskInvert", crate::i18n::tr("Invert"), m.invert).clicked() {
+    }
+    divider(ui);
+    egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 10, bottom: 8 }).show(ui, |ui| {
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let invert = text_button(ui, "maskInvert", crate::i18n::tr("Invert"), m.invert);
+            if invert.clicked() {
                 let _ = app.run("mask.invert", json!({}));
             }
-            if icon_button(ui, "maskDelete", Icon::Trash, vec2(26.0, 24.0), false, true, "Delete mask").clicked() {
-                let _ = app.run("mask.delete", json!({}));
-            }
+            ui.add(egui::Label::new(egui::RichText::new(&m.name).font(t.semibold(13.0))).truncate());
         });
     });
-    if app.ui.tool == "brush" {
-        divider(ui);
-        brush_settings(app, ui);
-    }
     divider(ui);
     for s in LOCAL {
         let v = local_get(&m.adjust, s.id);
@@ -311,7 +171,6 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     let out = slider(ui, &refine, m.refine, true, None);
     apply_slider_out(app, &refine, out, |app, v| app.run("mask.refine", json!({"value": v})));
     ui.add_space(30.0);
-    let _ = Stroke::NONE;
 }
 
 /// The first mask can be created directly, without opening a menu.
@@ -522,6 +381,14 @@ fn overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             }
         });
     }
+    if colored {
+        let mut color = app.ui.mask_overlay_color;
+        let response = ui.color_edit_button_srgb(&mut color);
+        register(ui.ctx(), "maskOverlayCustomColor", response.rect);
+        if response.changed() {
+            let _ = app.run("view.maskOverlayColor", json!({"color": color}));
+        }
+    }
     let spec = ControlSpec {
         id: "ui.maskOverlayOpacity",
         label: "Opacity",
@@ -535,7 +402,7 @@ fn overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     };
     let out = slider(ui, &spec, app.ui.mask_overlay_opacity as f64, colored && app.ui.mask_overlay, None);
     if let Some(v) = out.value {
-        app.ui.mask_overlay_opacity = v as f32;
+        let _ = app.run("view.maskOverlayColor", json!({"color": app.ui.mask_overlay_color, "opacity": v}));
     }
     let mut pins = app.ui.mask_pins;
     if ui.checkbox(&mut pins, crate::i18n::tr("Show Pins")).changed() {
@@ -875,36 +742,40 @@ fn brush_settings(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(crate::i18n::tr("Brush")).font(t.semibold(13.0)));
             if text_button(ui, "brushAdd", crate::i18n::tr("Add"), !app.ui.brush_erase).clicked() {
-                app.ui.brush_erase = false;
+                let _ = app.run("mask.brushSettings", json!({"erase": false}));
             }
             if text_button(ui, "brushErase", crate::i18n::tr("Erase"), app.ui.brush_erase).clicked() {
-                app.ui.brush_erase = true;
+                let _ = app.run("mask.brushSettings", json!({"erase": true}));
             }
         });
-        let mut auto = app.ui.brush_auto_mask;
-        if ui
-            .checkbox(&mut auto, crate::i18n::tr("Auto Mask"))
-            .on_hover_text(crate::i18n::tr("Paint only areas like the one under the brush"))
-            .changed()
-        {
-            app.ui.brush_auto_mask = auto;
-        }
     });
     for (id, label, min, max, get) in [
         ("ui.brushSize", "Size", 1.0, 100.0, (app.ui.brush_size * 400.0) as f64),
         ("ui.brushFeather", "Feather", 0.0, 100.0, app.ui.brush_feather as f64),
         ("ui.brushFlow", "Flow", 1.0, 100.0, app.ui.brush_flow as f64),
+        ("ui.brushDensity", "Density", 0.0, 100.0, app.ui.brush_density as f64),
     ] {
         let s = ControlSpec { id, label, section: Section::Light, min, max, default: min, step: 1.0, decimals: 0, track: Track::Plain };
         let out = slider(ui, &s, get, true, None);
         if let Some(v) = out.value {
-            match id {
-                "ui.brushSize" => app.ui.brush_size = (v / 400.0) as f32,
-                "ui.brushFeather" => app.ui.brush_feather = v as f32,
-                _ => app.ui.brush_flow = v as f32,
-            }
+            let (key, value) = match id {
+                "ui.brushSize" => ("size", v / 400.0),
+                "ui.brushFeather" => ("feather", v),
+                "ui.brushDensity" => ("density", v),
+                _ => ("flow", v),
+            };
+            let _ = app.run("mask.brushSettings", json!({key: value}));
         }
     }
+    egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
+        let mut auto = app.ui.brush_auto_mask;
+        let response =
+            ui.checkbox(&mut auto, crate::i18n::tr("Auto Mask")).on_hover_text(crate::i18n::tr("Paint only areas like the one under the brush"));
+        register(ui.ctx(), "check:brushAutoMask", response.rect);
+        if response.changed() {
+            let _ = app.run("mask.brushSettings", json!({"autoMask": auto}));
+        }
+    });
 }
 
 #[cfg(test)]

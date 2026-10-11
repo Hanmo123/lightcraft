@@ -1106,3 +1106,33 @@ fn undo_and_redo_show_the_photo_they_change() {
     s.execute("edit.undo", &json!({})).unwrap();
     assert_eq!(s.selection, before, "a step over several photos keeps the selection");
 }
+
+#[test]
+fn brush_strokes_target_the_requested_component_and_reject_invalid_targets_atomically() {
+    use lightcraft_develop::MaskShape;
+    let mut s = demo();
+    s.execute("mask.add", &json!({"kind": "brush"})).unwrap();
+    s.execute("mask.addComponent", &json!({"kind": "radial", "op": "add"})).unwrap();
+    s.execute("mask.addComponent", &json!({"kind": "brush", "op": "subtract"})).unwrap();
+    let before = active_dev(&s);
+    for component in [json!(-1), json!(1), json!(99), json!("0")] {
+        assert!(s.execute("mask.brushStroke", &json!({"component": component, "points": [[0.5, 0.5]]})).is_err());
+        assert_eq!(active_dev(&s), before);
+        assert_eq!(s.active_mask, Some(1));
+    }
+    s.execute("mask.brushStroke", &json!({"component": 0, "points": [[0.5, 0.5]], "density": 38})).unwrap();
+    let after = active_dev(&s);
+    let MaskShape::Brush { strokes } = &after.masks[0].components[0].shape else { panic!("brush") };
+    assert_eq!(strokes.len(), 1);
+    assert_eq!(strokes[0].density, 38.0);
+    assert_eq!(after.masks[0].components[1..], before.masks[0].components[1..]);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s), before);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s), after);
+    // Omitting the target remains compatible with existing CLI and MCP callers.
+    s.execute("mask.brushStroke", &json!({"points": [[0.2, 0.2]]})).unwrap();
+    let d = active_dev(&s);
+    let MaskShape::Brush { strokes } = &d.masks[0].components[2].shape else { panic!("brush") };
+    assert_eq!(strokes.len(), 1);
+}

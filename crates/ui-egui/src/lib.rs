@@ -422,6 +422,9 @@ impl LightcraftApp {
             return r;
         }
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
+        if r.is_ok() {
+            panels::masking::selection_changed(self, id, &params);
+        }
         if r.is_ok() && id == "mask.adjust" {
             // Judge local adjustments on the photo, without the selection overlay obscuring them.
             // Keep it hidden after release; O / the overlay eye can show it again.
@@ -1042,6 +1045,7 @@ impl LightcraftApp {
         panels::library_problem::banner(self, ui);
         panels::strip::show(self, ui);
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| docking::show(self, ui));
+        panels::masking::floating(self, &ctx);
         panels::second::show(self, &ctx);
         panels::notices::show(self, &ctx);
         panels::dialogs::show(self, &ctx);

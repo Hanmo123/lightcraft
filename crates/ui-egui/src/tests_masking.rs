@@ -1189,3 +1189,143 @@ fn ai_masks_without_the_model_offer_the_download() {
     assert!(develop(&h).masks.is_empty());
     assert!(t.elapsed() < SETTLE, "{:?}", t.elapsed());
 }
+
+#[test]
+fn masking_component_selection_routes_brushes_and_settings_without_editing_the_photo() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "brush"}));
+    exec(&mut h, "mask.addComponent", json!({"kind": "brush", "op": "subtract"}));
+    click(&mut h, "component:0");
+    assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(0));
+    assert_eq!(h.app.ui.tool, "brush");
+    let before = develop(&h);
+    exec(&mut h, "mask.brushSettings", json!({"density": 38, "feather": 0, "flow": 100}));
+    h.request("ui.set", json!({"leftPanel": false}), T);
+    assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(0), "ui.set retains component selection");
+    for (command, params) in [
+        ("mask.brushSettings", json!({"size": 0.05, "density": 101})),
+        ("mask.selectComponent", json!({"id": 1, "component": 9})),
+        ("ui.maskPanel", json!({"floating": "yes"})),
+    ] {
+        let state = serde_json::to_value(&h.app.ui).unwrap();
+        let selected = h.app.ui.mask_component;
+        assert!(h.app.run(command, params).is_err());
+        assert_eq!(serde_json::to_value(&h.app.ui).unwrap(), state);
+        assert_eq!(h.app.ui.mask_component, selected);
+    }
+    assert_eq!(develop(&h), before);
+    brush_at(&mut h, 0.4, 0.5);
+    let after = develop(&h);
+    let MaskShape::Brush { strokes } = &after.masks[0].components[0].shape else { panic!("brush") };
+    assert_eq!(strokes.len(), 1);
+    assert_eq!(strokes[0].density, 38.0);
+    assert_eq!(after.masks[0].components[1], before.masks[0].components[1]);
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(develop(&h), before);
+    exec(&mut h, "edit.redo", json!({}));
+    assert_eq!(develop(&h), after);
+    exec(&mut h, "mask.addComponent", json!({"kind": "luminanceRange", "op": "intersect"}));
+    assert!(h.app.widgets.iter().any(|(id, _)| id == "lumRange:2"));
+    assert!(!h.app.widgets.iter().any(|(id, _)| id == "slider:ui.brushDensity"));
+    click(&mut h, "component:0");
+    assert!(!h.app.widgets.iter().any(|(id, _)| id == "lumRange:2"));
+    assert!(h.app.widgets.iter().any(|(id, _)| id == "slider:ui.brushDensity"));
+    // Deleting an earlier component keeps the selected logical component.
+    exec(&mut h, "mask.selectComponent", json!({"component": 2}));
+    exec(&mut h, "mask.component", json!({"component": 0, "action": "delete"}));
+    assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(1));
+    assert!(h.app.widgets.iter().any(|(id, _)| id == "lumRange:1"));
+    h.settle(SETTLE);
+}
+
+#[test]
+fn masking_list_floats_moves_docks_and_preserves_overlay_preferences_without_photo_edits() {
+    let mut h = detail("panel.masking");
+    let has = |h: &Headless, key: &str| h.app.widgets.iter().any(|(id, _)| id == key);
+    let rect = |h: &Headless, key: &str| h.app.widgets.iter().find(|(id, _)| id == key).unwrap().1;
+    assert!(!h.app.ui.mask_panel_floating);
+    click(&mut h, "maskNew:brush");
+    assert!(has(&h, "maskList:embedded"));
+    assert!(!has(&h, "maskList:floating"));
+    let before = develop(&h);
+    click(&mut h, "icon:maskPanelArrange");
+    h.step();
+    h.step();
+    assert!(has(&h, "maskList:floating"));
+    assert!(!has(&h, "maskList:embedded"));
+    let initial = rect(&h, "panel:maskFloating");
+    for _ in 0..100 {
+        h.step();
+    }
+    let window = rect(&h, "panel:maskFloating");
+    assert!((initial.height() - window.height()).abs() < 1.0, "idle frames must not grow the window: {initial:?} -> {window:?}");
+    let right = rect(&h, "panel:right_panel");
+    assert!(window.right() <= right.left() + 1.0, "{window:?} {right:?}");
+    assert!(window.contains_rect(rect(&h, "component:0")));
+    assert!(right.contains_rect(rect(&h, "slider:ui.brushDensity")));
+    // Clicking controls above the canvas must never start a brush stroke underneath.
+    click(&mut h, "component:0");
+    click(&mut h, "icon:maskOverlay");
+    assert!(!h.app.ui.mask_overlay);
+    click(&mut h, "icon:maskOverlay");
+    click(&mut h, "maskOverlaySwatch");
+    click(&mut h, "maskOverlayColor:28c846");
+    let r = h.request("ui.clickWidget", json!({"id": "slider:ui.maskOverlayOpacity", "fx": 0.75}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(h.app.ui.mask_overlay_color, [40, 200, 70]);
+    assert!(h.app.ui.mask_overlay_opacity > 60.0);
+    h.request("ui.key", json!({"key": "Escape"}), T);
+    let title = rect(&h, "maskPanelTitle").center();
+    let img = h.app.image_rect.unwrap();
+    let from = (title - img.min) / img.size();
+    let to = (title + egui::vec2(-90.0, 60.0) - img.min) / img.size();
+    let r = h.request(
+        "ui.pointer",
+        json!({"events": [
+            {"kind": "down", "x": from.x, "y": from.y},
+            {"kind": "move", "x": to.x, "y": to.y},
+            {"kind": "up", "x": to.x, "y": to.y}
+        ]}),
+        T,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let moved = rect(&h, "panel:maskFloating");
+    assert!((moved.left() - window.left() + 90.0).abs() < 3.0, "{window:?} -> {moved:?}");
+    assert_eq!(develop(&h), before, "list interactions never paint through the floating window");
+    let saved = serde_json::to_value(&h.app.ui).unwrap();
+    let restored: crate::UiState = serde_json::from_value(saved).unwrap();
+    assert!(restored.mask_panel_floating);
+    assert_eq!(restored.mask_panel_rect, h.app.ui.mask_panel_rect);
+    assert_eq!(restored.mask_overlay_color, h.app.ui.mask_overlay_color);
+    assert_eq!(restored.mask_overlay_opacity, h.app.ui.mask_overlay_opacity);
+    // A fresh egui context restores the saved placement without frame-size growth.
+    let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Services { png: None, ..Default::default() });
+    app.ui = restored;
+    app.run("mask.add", json!({"kind": "brush"})).unwrap();
+    let mut reopened = Headless::new(app, [1200.0, 800.0], 1.0);
+    for _ in 0..5 {
+        reopened.step();
+    }
+    let back = rect(&reopened, "panel:maskFloating");
+    assert!((back.left() - moved.left()).abs() < 2.0 && (back.top() - moved.top()).abs() < 2.0, "{moved:?} -> {back:?}");
+    assert!((back.width() - moved.width()).abs() < 2.0 && (back.height() - moved.height()).abs() < 2.0, "{moved:?} -> {back:?}");
+    click(&mut h, "button:maskPanelDock");
+    assert!(has(&h, "maskList:embedded"));
+    assert!(!has(&h, "maskList:floating"));
+    exec(&mut h, "edit.undo", json!({}));
+    assert!(develop(&h).masks.is_empty(), "panel and overlay changes do not consume photo undo");
+    exec(&mut h, "ui.maskPanel", json!({"floating": true}));
+    assert!(has(&h, "maskNew:brush"), "first mask choices remain embedded even with the float preference");
+    assert!(!has(&h, "maskList:floating"));
+    for _ in 0..12 {
+        exec(&mut h, "mask.add", json!({"kind": "radial"}));
+    }
+    let crowded = rect(&h, "panel:maskFloating");
+    for _ in 0..100 {
+        h.step();
+    }
+    let stable = rect(&h, "panel:maskFloating");
+    assert!((crowded.height() - stable.height()).abs() < 1.0, "scrolling list remains bounded: {crowded:?} -> {stable:?}");
+    assert!(stable.contains_rect(rect(&h, "icon:maskOverlay")), "overlay controls remain outside the list scroll area");
+    h.settle(SETTLE);
+}

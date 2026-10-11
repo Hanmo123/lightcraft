@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (created; shortcut notes moved here from the checklist) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (mask workspace layout and component targeting) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 How LightCraft's interaction compares with Lightroom's: views, panels, tools and handles, modifier
 keys, shortcuts, zoom, context menus and feel. Rows for individual menu items and shortcuts live in
@@ -40,6 +40,23 @@ Remaining: **40–70 h** (zoom detail 8–15 h, brush and masking feel 8–12 h,
 h, Classic keymap layer 4–8 h, context-menu audit 4–8 h, text-field and IME polish 4–8 h). Output
 modules and AI tools are counted with their features in [target-app-parity.md](target-app-parity.md).
 
+## Masking workspace (#450)
+
+The mask/component list is embedded above the right-side settings by default. Its panel icon
+floats it beside those settings; drag the title to move it, resize its corner, and use the panel
+icon or **Dock to panel** to embed it again. Placement and overlay preferences are saved. With no
+masks, creation choices remain directly visible in the right panel; subsequent creation uses +.
+
+Selecting a component highlights its row and shows its tool controls on the right. Brush strokes,
+Object clicks and colour sampling target that component; brush Size, Feather, Flow, Density,
+Add/Erase and Auto Mask apply to subsequent strokes. Add/Subtract remain under the selected mask.
+The list footer contains the overlay checkbox and colour/options popups (custom colour, opacity,
+visualization mode and pins). These display/layout preferences do not add photo undo steps.
+
+The mask row uses original type icons; actual matte thumbnails, drag-to-reorder, A/B brushes,
+pressure, live-preview/stationary accumulation and the rest of Camera Raw's gesture details remain
+open. This is a layout and component-targeting step, not a claim of full visual/interaction parity.
+
 ## Shortcuts
 
 Compared `plan/lightroom/06-shortcuts.md` (desktop part) with our bindings: command specs in `crates/engine/src/cmd/`,
@@ -78,4 +95,5 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-11 | minor | #450: embedded/floating list, selected-component settings, overlay footer and remaining masking gaps |
 | 2026-10-10 | major | Created: measured command and shortcut counts, assessment by area, estimates; moved the shortcut conflicts section here from the checklist |

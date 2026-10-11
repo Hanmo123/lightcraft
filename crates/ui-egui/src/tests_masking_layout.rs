@@ -86,6 +86,10 @@ fn masking_long_names_and_describe_controls_stay_inside_the_panel() {
     for locale in [Locale::En, Locale::De, Locale::PtBr] {
         for width in [250.0, 270.0, 520.0] {
             let (texts, widgets) = panel(width, 2.0, locale, true, false);
+            for key in ["icon:maskOverlay", "maskOverlaySwatch", "icon:maskOverlayOptions"] {
+                let footer = widgets.iter().find(|(id, _)| id == key).unwrap().1;
+                assert!(footer.left() >= 16.0 && footer.right() <= width - 16.0, "{locale:?} {width}: {key} {footer:?}");
+            }
             let row = widgets.iter().find(|(id, _)| id == "mask:1").unwrap().1;
             let name = texts.iter().find(|t| t.galley.job.text == LONG_NAME).unwrap();
             assert!(name.galley.elided, "long mask names should be elided");

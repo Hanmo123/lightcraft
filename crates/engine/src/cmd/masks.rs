@@ -223,7 +223,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Brush Stroke",
             [],
             None,
-            "{id?: maskId, points: [[x,y],…] normalized, size?: fraction of long edge (0.03), feather?, flow?, density?, erase?: bool, autoMask?: bool}",
+            "{id?: maskId, component?: brush index (last brush when omitted), points: [[x,y],…] normalized, size?: fraction of long edge (0.03), feather?, flow?, density?, erase?: bool, autoMask?: bool}",
             has_active,
             |s, p| {
                 let pts: Vec<Point> = p
@@ -243,6 +243,12 @@ pub fn specs() -> Vec<CommandSpec> {
                     erase: bool_or(p, "erase", false),
                     auto_mask: bool_or(p, "autoMask", false),
                 };
+                let component = match p.get("component").filter(|v| !v.is_null()) {
+                    Some(v) => {
+                        Some(v.as_u64().and_then(|v| usize::try_from(v).ok()).ok_or_else(|| bad("mask.brushStroke", "component must be an index"))?)
+                    }
+                    None => None,
+                };
                 let next = s.active().and_then(|id| s.develop_of(id)).map(|d| d.next_mask_id()).unwrap_or(1);
                 let want = p.get("id").and_then(Value::as_u64).map(|v| v as u32).or(s.active_mask);
                 masks_edit(s, "mask.brushStroke", "Brush", |masks, active| {
@@ -255,7 +261,12 @@ pub fn specs() -> Vec<CommandSpec> {
                         }
                     };
                     let m = &mut masks[i];
-                    if let Some(MaskComponent { shape: MaskShape::Brush { strokes }, .. }) =
+                    if let Some(component) = component {
+                        let Some(MaskComponent { shape: MaskShape::Brush { strokes }, .. }) = m.components.get_mut(component) else {
+                            return Err(bad("mask.brushStroke", "not a brush component"));
+                        };
+                        strokes.push(stroke);
+                    } else if let Some(MaskComponent { shape: MaskShape::Brush { strokes }, .. }) =
                         m.components.iter_mut().rev().find(|c| matches!(c.shape, MaskShape::Brush { .. }))
                     {
                         strokes.push(stroke);
@@ -329,7 +340,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Object Click",
             [],
             None,
-            "{x, y: normalized image point, exclude?: bool (⌥-click: leave this part out), id?: maskId} — a click on the selected mask's Object selection (its last Object component); SAM 3 re-segments the object → {include, exclude}",
+            "{x, y: normalized image point, exclude?: bool (⌥-click: leave this part out), id?: maskId, component?: index} — a click on the selected mask's Object selection (its last Object component); SAM 3 re-segments the object → {include, exclude}",
             has_active,
             |s, p| {
                 let c = "mask.objectPoint";
@@ -342,11 +353,14 @@ pub fn specs() -> Vec<CommandSpec> {
                 let mid = mask_id(p, s.active_mask, c)?;
                 let d = s.develop_of(id).unwrap_or_default();
                 let m = d.masks.iter().find(|m| m.id == mid).ok_or_else(|| bad(c, format!("no mask {mid}")))?;
-                let k = m
-                    .components
-                    .iter()
-                    .rposition(|x| matches!(x.shape, MaskShape::Object { .. }))
-                    .ok_or_else(|| bad(c, "the mask has no Object selection (add one first)"))?;
+                let k = match p.get("component").filter(|v| !v.is_null()) {
+                    Some(v) => v.as_u64().and_then(|v| usize::try_from(v).ok()).ok_or_else(|| bad(c, "component must be an index"))?,
+                    None => m
+                        .components
+                        .iter()
+                        .rposition(|x| matches!(x.shape, MaskShape::Object { .. }))
+                        .ok_or_else(|| bad(c, "the mask has no Object selection (add one first)"))?,
+                };
                 let Some(MaskShape::Object { hint, exclude: ex, edge, .. }) = m.components.get(k).map(|x| &x.shape) else {
                     return Err(bad(c, "not an Object component"));
                 };

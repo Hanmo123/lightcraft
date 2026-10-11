@@ -180,3 +180,14 @@ A center `move` can include `before` (panel ID or null to append) for tab order.
 The equivalent `{"action": ...}` form accepts a serialized shared docking action;
 this is also the form emitted by the renderer. Protected-canvas and app-specific panel
 rules apply equally to both forms.
+
+### Mask workspace preferences
+
+Through `engine.execute`, `ui.maskPanel {"floating": true|false}` detaches/docks the list.
+`mask.selectComponent {"id": maskId, "component": index}` selects the editable component.
+`mask.brushSettings` takes any of `size` (0.0025–0.25 of the image long edge), `feather`
+(0–100), `flow` (1–100), `density` (0–100), `erase` and `autoMask` (booleans). These UI
+commands do not change photo history. Subsequent `mask.brushStroke` and `mask.objectPoint`
+accept an optional `component` index; omission preserves the last matching component behavior.
+Overlay display still uses `view.maskOverlay`, `view.maskOverlayMode`, `view.maskOverlayColor`
+(`color`, `opacity`) and `view.maskPins`.
