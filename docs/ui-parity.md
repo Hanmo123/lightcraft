@@ -75,7 +75,7 @@ refresh after edits and undo/redo. Hidden masks retain their range preview, inde
 overlay colour/opacity. Component rows keep their original type icons. Six-dot grips to the right
 of each ellipsis reorder masks or components within their mask, with an insertion line and edge
 scrolling. A drop is one undo step and preserves selection/tool targeting; Escape, outside drops
-and stale drags do not reorder. A/B brushes, pressure, live-preview/stationary accumulation and
+and stale drags do not reorder. A/B brushes, pressure, live preview and
 broader gesture parity remain open.
 
 ## Shortcuts
