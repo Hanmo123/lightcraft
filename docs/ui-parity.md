@@ -49,7 +49,8 @@ masks, creation choices remain directly visible in the right panel; subsequent c
 
 Selecting a component highlights its row and shows its tool controls on the right. Brush strokes,
 Object clicks and colour sampling target that component; brush Size, Feather, Flow, Density,
-Add/Erase and Auto Mask apply to subsequent strokes. Add/Subtract remain under the selected mask.
+Add/Erase and Auto Mask apply to subsequent strokes. Add/Subtract occupy equal halves of the
+selected mask’s action row, with larger hit areas and spacing above.
 The list footer contains the overlay checkbox and colour/options popups (custom colour, opacity,
 visualization mode and pins). These display/layout preferences do not add photo undo steps.
 

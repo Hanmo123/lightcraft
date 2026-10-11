@@ -283,13 +283,20 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
                 for (i, c) in m.components.iter().enumerate() {
                     component_row(app, ui, m, i, c);
                 }
-                ui.horizontal_wrapped(|ui| {
-                    let add = text_button(ui, &format!("maskPlus:{}", m.id), crate::i18n::tr("Add"), false);
-                    register(ui.ctx(), "button:maskAddComp", add.rect);
-                    egui::Popup::menu(&add).show(|ui| component_menu(app, ui, "add"));
-                    let sub = text_button(ui, &format!("maskMinus:{}", m.id), crate::i18n::tr("Subtract"), false);
-                    register(ui.ctx(), "button:maskSubComp", sub.rect);
-                    egui::Popup::menu(&sub).show(|ui| component_menu(app, ui, "subtract"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let size = vec2(((ui.available_width() - 8.0) / 2.0).max(1.0), 32.0);
+                    for (op, label, key, alias) in [("add", "Add", "maskPlus", "maskAddComp"), ("subtract", "Subtract", "maskMinus", "maskSubComp")] {
+                        let label = crate::i18n::tr(label);
+                        let text = one_line(ui.painter(), label, t.semibold(12.5), t.text, (size.x - 16.0).max(0.0));
+                        let button = ui
+                            .add_sized(size, egui::Button::new(text).stroke(Stroke::new(1.0, t.button_border)).corner_radius(4.0))
+                            .on_hover_text(label);
+                        register(ui.ctx(), format!("button:{key}:{}", m.id), button.rect);
+                        register(ui.ctx(), format!("button:{alias}"), button.rect);
+                        egui::Popup::menu(&button).show(|ui| component_menu(app, ui, op));
+                    }
                 });
                 describe_field(app, ui, false);
             });
