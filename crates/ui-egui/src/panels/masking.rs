@@ -129,16 +129,6 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         }
     }
     divider(ui);
-    egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 10, bottom: 8 }).show(ui, |ui| {
-        ui.allocate_ui_with_layout(vec2(ui.available_width(), 24.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let invert = text_button(ui, "maskInvert", crate::i18n::tr("Invert"), m.invert);
-            if invert.clicked() {
-                let _ = app.run("mask.invert", json!({}));
-            }
-            ui.add(egui::Label::new(egui::RichText::new(&m.name).font(t.semibold(13.0))).truncate());
-        });
-    });
-    divider(ui);
     for s in LOCAL {
         let v = local_get(&m.adjust, s.id);
         let out = slider(ui, s, v, true, None);
