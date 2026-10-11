@@ -87,6 +87,12 @@ scrolling pans in both axes and respects the operating system's scrolling direct
 These gestures work in Detail (including editing tools and full-screen preview), Compare and Reference
 views, and only apply over their image areas. Panning stops at the image edges.
 
+In the Masking panel, the first mask's creation choices are visible directly. Once a mask exists,
+`icon:maskCreate` opens the Masks header's + dropdown. Both use `maskNew:<kind>` IDs (for example
+`maskNew:brush` and `maskNew:radial`). With existing masks these entries exist only while the
+dropdown is open: a choice closes it; Escape or a click outside dismisses it. Deleting or undoing
+the last mask restores the direct choices.
+
 Mask brushing uses the UI command `tool.brush` through `engine.execute`. With `{}` it activates
 painting on the current mask. `{"new": true}` creates a separate brush mask; `{"op": "add"}` or
 `{"op": "subtract"}` appends a brush component to the selected mask. Creating either starts in

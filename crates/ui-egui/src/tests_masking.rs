@@ -49,6 +49,74 @@ fn brush_at(h: &mut Headless, x: f64, y: f64) {
     pointer(h, json!([{"kind": "down", "x": x, "y": y}, {"kind": "up", "x": x, "y": y}]));
 }
 
+/// The first mask has direct choices; subsequent masks use the compact creation menu.
+#[test]
+fn create_mask_menu_opens_dismisses_and_creates_undoable_masks() {
+    let mut h = detail("panel.masking");
+    let choices_visible = |h: &Headless| h.app.widgets.iter().filter(|(id, _)| id.starts_with("maskNew:")).count();
+    assert_eq!(choices_visible(&h), 10, "the first mask needs no extra click");
+    assert!(!h.app.widgets.iter().any(|(id, _)| id == "icon:maskCreate"));
+    click(&mut h, "maskNew:linear");
+    let first = develop(&h).masks;
+    assert_eq!(first.len(), 1);
+    assert_eq!(choices_visible(&h), 0, "creation collapses the choices");
+    exec(&mut h, "edit.undo", json!({}));
+    assert!(develop(&h).masks.is_empty());
+    assert_eq!(choices_visible(&h), 10, "undoing the first mask restores the direct choices");
+    exec(&mut h, "edit.redo", json!({}));
+    assert_eq!(develop(&h).masks, first);
+    assert_eq!(choices_visible(&h), 0);
+    click(&mut h, "icon:maskCreate");
+    assert_eq!(choices_visible(&h), 10);
+    h.request("ui.key", json!({"key": "Escape"}), T);
+    assert_eq!(choices_visible(&h), 0);
+    assert_eq!(h.app.ui.right, RightPanel::Masking);
+    assert_eq!(h.app.ui.view, crate::state::ViewMode::Detail);
+    assert_eq!(develop(&h).masks, first);
+
+    click(&mut h, "icon:maskCreate");
+    // Click the header, outside the popup, without creating a mask.
+    let plus = h.app.widgets.iter().find(|(id, _)| id == "icon:maskCreate").unwrap().1;
+    h.request("ui.click", json!({"x": plus.left() - 80.0, "y": plus.center().y}), T);
+    assert_eq!(choices_visible(&h), 0);
+    assert_eq!(develop(&h).masks, first);
+
+    for kind in ["linear", "radial", "brush", "luminanceRange", "colorRange"] {
+        let before = develop(&h).masks;
+        click(&mut h, "icon:maskCreate");
+        click(&mut h, &format!("maskNew:{kind}"));
+        assert_eq!(choices_visible(&h), 0, "choosing {kind} closes the menu");
+        let after = develop(&h).masks;
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(&after[..before.len()], &before);
+        let created = after.last().unwrap();
+        assert_eq!(h.app.session.active_mask, Some(created.id));
+        assert_eq!(created.components.len(), 1);
+        let shape = &created.components[0].shape;
+        assert!(matches!(
+            (kind, shape),
+            ("linear", MaskShape::Linear { .. })
+                | ("radial", MaskShape::Radial { .. })
+                | ("brush", MaskShape::Brush { .. })
+                | ("luminanceRange", MaskShape::LuminanceRange { .. })
+                | ("colorRange", MaskShape::ColorRange { .. })
+        ));
+        if ["linear", "radial", "brush", "colorRange"].contains(&kind) {
+            assert_eq!(h.app.ui.tool, kind);
+        }
+        exec(&mut h, "edit.undo", json!({}));
+        assert_eq!(develop(&h).masks, before);
+        exec(&mut h, "edit.redo", json!({}));
+        assert_eq!(develop(&h).masks, after);
+    }
+    for mask in develop(&h).masks {
+        exec(&mut h, "mask.delete", json!({"id": mask.id}));
+    }
+    assert!(develop(&h).masks.is_empty());
+    assert_eq!(choices_visible(&h), 10, "deleting the last mask restores direct creation");
+    assert!(!h.app.widgets.iter().any(|(id, _)| id == "icon:maskCreate"));
+}
+
 /// Evaluate the real composite, with a deterministic embedded sky matte (no AI model required).
 fn mask_coverage(h: &Headless, mask: usize, x: usize, y: usize) -> f32 {
     use lightcraft_pipeline::{
@@ -116,6 +184,7 @@ fn new_brush_starts_a_separate_mask_in_paint_mode() {
     let original = develop(&h).masks[0].clone();
     h.app.ui.brush_erase = true;
     h.app.ui.mask_overlay = false;
+    click(&mut h, "icon:maskCreate");
     click(&mut h, "maskNew:brush");
     assert_eq!(h.app.session.active_mask, Some(2));
     assert!(!h.app.ui.brush_erase);
@@ -143,14 +212,8 @@ fn mask_adjustments_hide_overlay_without_disabling_the_mask() {
     // Changing the shape needs the overlay; changing the image needs an unobscured preview.
     exec(&mut h, "mask.refine", json!({"value": 10.0}));
     assert!(h.app.ui.mask_overlay);
-    // The dock header pushes this adjustment below the initial viewport. Exercise the
-    // actual visible slider rather than sending a synthetic click outside its clipped body.
+    // Removing the creation grid makes the exposure adjustment visible without scrolling.
     let panel = h.app.widgets.iter().find(|(id, _)| id == "panel:right_panel").unwrap().1;
-    let slider = h.app.widgets.iter().find(|(id, _)| id == "slider:exposure").unwrap().1;
-    assert!(!panel.contains_rect(slider), "exposure initially needs scrolling: {slider:?} in {panel:?}");
-    h.request("ui.move", json!({"x": panel.center().x, "y": panel.center().y}), T);
-    h.request("ui.scroll", json!({"dy": -160.0}), T);
-    h.settle(SETTLE);
     let slider = h.app.widgets.iter().find(|(id, _)| id == "slider:exposure").unwrap().1;
     assert!(panel.contains_rect(slider), "exposure is visible before clicking: {slider:?} in {panel:?}");
     let r = h.request("ui.clickWidget", json!({"id": "slider:exposure", "fx": 0.7}), T);

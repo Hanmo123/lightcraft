@@ -90,118 +90,29 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     let t = Tokens::get(ui.ctx());
     let d = app.session.develop_of(id).unwrap_or_default();
     header(ui, "Masking");
-    egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
-        ui.label(egui::RichText::new(crate::i18n::tr("Create New Mask")).color(t.text_dim));
-        ui.add_space(6.0);
-        let tiles: [(&str, &str, Icon); 10] = [
-            ("object", "Object", Icon::Subject),
-            ("prompt", "Describe", Icon::Subject),
-            ("subject", "Subject", Icon::Subject),
-            ("sky", "Sky", Icon::Sky),
-            ("background", "Background", Icon::Subject),
-            ("brush", "Brush", Icon::Brush),
-            ("linear", "Linear", Icon::Linear),
-            ("radial", "Radial", Icon::Radial),
-            ("luminanceRange", "Luminance", Icon::Sliders),
-            ("colorRange", "Color", Icon::Picker),
-        ];
-        // four 52 pt tiles a row when they and their labels fit, else fewer (wider for a long label)
-        let widest = |size: f32| {
-            let font = t.font(size);
-            tiles
-                .iter()
-                .map(|(_, l, _)| ui.painter().layout_no_wrap(crate::i18n::tr(l).to_string(), font.clone(), t.text_dim).size().x)
-                .fold(0.0, f32::max)
-        };
-        let (cols, tile, size) = tile_layout(ui.available_width(), widest);
-        egui::Grid::new("mask-tiles").spacing(vec2(TILE_GAP, TILE_GAP)).show(ui, |ui| {
-            for (i, (kind, label, icon)) in tiles.iter().enumerate() {
-                let (r, resp) = ui.allocate_exact_size(vec2(tile, 52.0), Sense::click());
-                register(ui.ctx(), format!("maskNew:{kind}"), r);
-                ui.painter().rect_filled(r, 4.0, if resp.hovered() { t.hover } else { t.inset });
-                paint(ui.painter(), Rect::from_center_size(r.center() - vec2(0.0, 7.0), vec2(20.0, 20.0)), *icon, t.text_label);
-                // (cut short only in a panel too narrow for the label: the full name on hover)
-                let label = crate::i18n::tr(label);
-                let g = one_line(ui.painter(), label, t.font(size), t.text_dim, tile - 2.0 * TILE_PAD);
-                let elided = g.elided;
-                let at = pos2(r.center().x, r.bottom() - 9.0) - g.size() / 2.0;
-                register(ui.ctx(), format!("maskNewLabel:{kind}"), Rect::from_min_size(at, g.size()));
-                ui.painter().galley(at, g, t.text_dim);
-                let resp = if elided { resp.on_hover_text(label) } else { resp };
-                if resp.clicked() {
-                    match *kind {
-                        "colorRange" => {
-                            // an empty colour range; clicking the photo samples it
-                            let _ = app.run("mask.add", json!({"kind": "colorRange"}));
-                            app.ui.tool = "colorRange".into();
-                            app.toast(ui.ctx(), crate::i18n::tr("Click the photo to pick a colour · ⇧-click adds more"));
-                        }
-                        "object" => start_object(app, ui.ctx(), "new"),
-                        "prompt" => start_describe(app, "new"),
-                        "brush" => {
-                            let _ = app.run("tool.brush", json!({"new": true}));
-                        }
-                        "linear" | "radial" => {
-                            app.ui.tool = kind.to_string();
-                            let _ = app.run("mask.add", json!({"kind": kind}));
-                        }
-                        k => {
-                            let _ = app.run("mask.add", json!({"kind": k}));
-                        }
-                    }
-                }
-                if i % cols == cols - 1 {
-                    ui.end_row();
-                }
-            }
+    if d.masks.is_empty() {
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 0, bottom: 10 }).show(ui, |ui| {
+            create_tiles(app, ui);
         });
-        describe_field(app, ui, true);
-        let seg = &app.session.segmenter;
-        let status = if seg.analyzing() {
-            Some("Analyzing the photo for AI masks…")
-        } else if seg.busy() {
-            Some("Selecting…")
-        } else if seg.detail_busy() || app.ui.detail_due.is_some() {
-            Some("Refining the mask's detail…")
-        } else {
-            None
-        };
-        if let Some(status) = status {
-            ui.add_space(4.0);
-            ui.add(egui::Label::new(egui::RichText::new(crate::i18n::tr(status)).color(t.text_dim)).wrap());
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
-        }
-        // the model download, while its dialog is closed
-        let download = seg.download_status();
-        if download.running && app.ui.dialog.is_none() {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let pct = if download.total > 0 { download.done as f64 / download.total as f64 } else { 0.0 };
-                let r = ui.add(
-                    egui::ProgressBar::new(pct as f32).desired_width(ui.available_width() - 70.0).text(format!("SAM 3: {} %", (pct * 100.0).floor())),
-                );
-                register(ui.ctx(), "maskSamProgress", r.rect);
-                if text_button(ui, "maskSamDetails", crate::i18n::tr("Details"), false).clicked() {
-                    app.offer_sam_download(None);
-                }
-            });
-        }
-    });
-    divider(ui);
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 0 }).show(ui, |ui| {
+            creation_status(app, ui);
+        });
+        return;
+    }
     // mask list
     egui::Frame::NONE.inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(crate::i18n::tr("Masks")).font(t.semibold(13.0)).color(t.text_label));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let plus = icon_button(ui, "maskCreate", Icon::Plus, vec2(24.0, 24.0), false, true, "Create New Mask");
+                egui::Popup::menu(&plus).show(|ui| create_menu(app, ui));
                 let on = app.ui.mask_overlay;
                 if icon_button(ui, "maskOverlay", Icon::Eye, vec2(24.0, 24.0), on, true, "Show overlay (O)").clicked() {
                     app.ui.mask_overlay = !on;
                 }
             });
         });
-        if d.masks.is_empty() {
-            ui.label(egui::RichText::new(crate::i18n::tr("No masks yet. Choose a mask type above.")).color(t.text_dim));
-        }
+        creation_status(app, ui);
         let count = d.masks.len();
         for (index, m) in d.masks.iter().enumerate() {
             let sel = app.session.active_mask == Some(m.id);
@@ -401,6 +312,153 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     apply_slider_out(app, &refine, out, |app, v| app.run("mask.refine", json!({"value": v})));
     ui.add_space(30.0);
     let _ = Stroke::NONE;
+}
+
+/// The first mask can be created directly, without opening a menu.
+fn create_tiles(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(egui::RichText::new(crate::i18n::tr("Create New Mask")).color(t.text_dim));
+    ui.add_space(6.0);
+    let tiles: [(&str, &str, Icon); 10] = [
+        ("object", "Object", Icon::Subject),
+        ("prompt", "Describe", Icon::Subject),
+        ("subject", "Subject", Icon::Subject),
+        ("sky", "Sky", Icon::Sky),
+        ("background", "Background", Icon::Subject),
+        ("brush", "Brush", Icon::Brush),
+        ("linear", "Linear", Icon::Linear),
+        ("radial", "Radial", Icon::Radial),
+        ("luminanceRange", "Luminance", Icon::Sliders),
+        ("colorRange", "Color", Icon::Picker),
+    ];
+    // four 52 pt tiles a row when they and their labels fit, else fewer (wider for a long label)
+    let widest = |size: f32| {
+        let font = t.font(size);
+        tiles
+            .iter()
+            .map(|(_, l, _)| ui.painter().layout_no_wrap(crate::i18n::tr(l).to_string(), font.clone(), t.text_dim).size().x)
+            .fold(0.0, f32::max)
+    };
+    let (cols, tile, size) = tile_layout(ui.available_width(), widest);
+    egui::Grid::new("mask-tiles").spacing(vec2(TILE_GAP, TILE_GAP)).show(ui, |ui| {
+        for (i, (kind, label, icon)) in tiles.iter().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(vec2(tile, 52.0), Sense::click());
+            register(ui.ctx(), format!("maskNew:{kind}"), r);
+            ui.painter().rect_filled(r, 4.0, if resp.hovered() { t.hover } else { t.inset });
+            paint(ui.painter(), Rect::from_center_size(r.center() - vec2(0.0, 7.0), vec2(20.0, 20.0)), *icon, t.text_label);
+            // (cut short only in a panel too narrow for the label: the full name on hover)
+            let label = crate::i18n::tr(label);
+            let g = one_line(ui.painter(), label, t.font(size), t.text_dim, tile - 2.0 * TILE_PAD);
+            let elided = g.elided;
+            let at = pos2(r.center().x, r.bottom() - 9.0) - g.size() / 2.0;
+            register(ui.ctx(), format!("maskNewLabel:{kind}"), Rect::from_min_size(at, g.size()));
+            ui.painter().galley(at, g, t.text_dim);
+            let resp = if elided { resp.on_hover_text(label) } else { resp };
+            if resp.clicked() {
+                create_mask(app, ui.ctx(), kind);
+            }
+            if i % cols == cols - 1 {
+                ui.end_row();
+            }
+        }
+    });
+}
+
+fn create_mask(app: &mut LightcraftApp, ctx: &egui::Context, kind: &str) {
+    match kind {
+        "colorRange" => {
+            let _ = app.run("mask.add", json!({"kind": "colorRange"}));
+            app.ui.tool = "colorRange".into();
+            app.toast(ctx, crate::i18n::tr("Click the photo to pick a colour · ⇧-click adds more"));
+        }
+        "object" => start_object(app, ctx, "new"),
+        "prompt" => start_describe(app, "new"),
+        "brush" => {
+            let _ = app.run("tool.brush", json!({"new": true}));
+        }
+        "linear" | "radial" => {
+            app.ui.tool = kind.to_string();
+            let _ = app.run("mask.add", json!({"kind": kind}));
+        }
+        _ => {
+            let _ = app.run("mask.add", json!({"kind": kind}));
+        }
+    }
+}
+
+/// New masks share the existing command paths; opening or dismissing the menu changes no edits.
+fn create_menu(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    ui.set_min_width(180.0);
+    for (kind, label) in [
+        ("object", "Object"),
+        ("prompt", "Describe"),
+        ("subject", "Subject"),
+        ("sky", "Sky"),
+        ("background", "Background"),
+        ("brush", "Brush"),
+        ("linear", "Linear Gradient"),
+        ("radial", "Radial Gradient"),
+        ("luminanceRange", "Luminance Range"),
+        ("colorRange", "Color Range"),
+    ] {
+        if kind == "brush" || kind == "luminanceRange" {
+            ui.separator();
+        }
+        let response = ui.add(egui::Button::new(crate::i18n::tr(label)).min_size(vec2(0.0, 26.0)));
+        register(ui.ctx(), format!("maskNew:{kind}"), response.rect);
+        if response.clicked() {
+            create_mask(app, ui.ctx(), kind);
+            ui.close();
+        }
+    }
+}
+
+/// Keep text entry and background progress visible after the creation menu closes.
+fn creation_status(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    let seg = &app.session.segmenter;
+    if !app.ui.describe.as_ref().is_some_and(|(op, _)| op == "new")
+        && !seg.analyzing()
+        && !seg.busy()
+        && !seg.detail_busy()
+        && app.ui.detail_due.is_none()
+        && !seg.download_status().running
+    {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    egui::Frame::NONE.inner_margin(egui::Margin { left: 8, right: 6, top: 0, bottom: 8 }).show(ui, |ui| {
+        describe_field(app, ui, true);
+        let seg = &app.session.segmenter;
+        let status = if seg.analyzing() {
+            Some("Analyzing the photo for AI masks…")
+        } else if seg.busy() {
+            Some("Selecting…")
+        } else if seg.detail_busy() || app.ui.detail_due.is_some() {
+            Some("Refining the mask's detail…")
+        } else {
+            None
+        };
+        if let Some(status) = status {
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(egui::RichText::new(crate::i18n::tr(status)).color(t.text_dim)).wrap());
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        // the model download, while its dialog is closed
+        let download = seg.download_status();
+        if download.running && app.ui.dialog.is_none() {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let pct = if download.total > 0 { download.done as f64 / download.total as f64 } else { 0.0 };
+                let r = ui.add(
+                    egui::ProgressBar::new(pct as f32).desired_width(ui.available_width() - 70.0).text(format!("SAM 3: {} %", (pct * 100.0).floor())),
+                );
+                register(ui.ctx(), "maskSamProgress", r.rect);
+                if text_button(ui, "maskSamDetails", crate::i18n::tr("Details"), false).clicked() {
+                    app.offer_sam_download(None);
+                }
+            });
+        }
+    });
 }
 
 /// The right-click menu of a mask in the Masks list.
@@ -727,7 +785,7 @@ pub(crate) fn start_describe(app: &mut LightcraftApp, op: &str) {
 /// The Describe field: type what to select ("sky", "the red car") and press Return.
 fn describe_field(app: &mut LightcraftApp, ui: &mut egui::Ui, new_mask: bool) {
     let Some((op, mut text)) = app.ui.describe.clone() else { return };
-    // a new mask's field sits under the tiles; one that combines, under the selected mask
+    // a new mask's field sits under the list header; one that combines, under the selected mask
     if (op == "new") != new_mask {
         return;
     }
