@@ -25,6 +25,8 @@ pub enum Icon {
     Versions,
     Activity,
     More,
+    /// Six dots for grabbing and reordering a list row.
+    Grip,
     Tag,
     Info,
     GridPhoto,
@@ -245,6 +247,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         More | Dots => {
             for x in [5.0, 10.0, 15.0] {
                 pen.dot(x, 10.0, 1.3);
+            }
+        }
+        Grip => {
+            for x in [7.0, 13.0] {
+                for y in [5.0, 10.0, 15.0] {
+                    pen.dot(x, y, 1.2);
+                }
             }
         }
         Tag => {

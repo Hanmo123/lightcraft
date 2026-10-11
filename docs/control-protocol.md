@@ -191,3 +191,10 @@ commands do not change photo history. Subsequent `mask.brushStroke` and `mask.ob
 accept an optional `component` index; omission preserves the last matching component behavior.
 Overlay display still uses `view.maskOverlay`, `view.maskOverlayMode`, `view.maskOverlayColor`
 (`color`, `opacity`) and `view.maskPins`.
+
+Mask/component rows expose `maskDrag:<mask-id>` and `componentDrag:<index>` grips.
+Use `ui.dragWidget` to drag onto the top/bottom half of another row (`maskGroup:<mask-id>`
+or `component:<index>`). Components stay within their parent mask; the list scrolls at its edges.
+A drop dispatches `mask.move {id, to}` or `mask.component {id, component, action:"move", to}`
+as one undoable edit. Component moves also retain the existing `delta: -1|1` form; specify
+either `to` or `delta`. Escape or dropping outside a compatible row cancels.

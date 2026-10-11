@@ -72,8 +72,11 @@ Mask rows show the actual composite coverage as white on black, with grey feathe
 fitted to the edited photo’s aspect ratio. Background renders share the canvas mask pipeline
 (add/subtract/intersect, inversion, range and AI masks), use a separate thumbnail cache, and
 refresh after edits and undo/redo. Hidden masks retain their range preview, independent of
-overlay colour/opacity. Component rows keep their original type icons. Drag-to-reorder, A/B
-brushes, pressure, live-preview/stationary accumulation and broader gesture parity remain open.
+overlay colour/opacity. Component rows keep their original type icons. Six-dot grips to the right
+of each ellipsis reorder masks or components within their mask, with an insertion line and edge
+scrolling. A drop is one undo step and preserves selection/tool targeting; Escape, outside drops
+and stale drags do not reorder. A/B brushes, pressure, live-preview/stationary accumulation and
+broader gesture parity remain open.
 
 ## Shortcuts
 
@@ -113,6 +116,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-11 | minor | #450: mask/component drag handles, insertion feedback, edge scrolling and one-step undo |
 | 2026-10-11 | minor | #450: fix overlay mode/custom-colour submenus closing the settings popup; verify both launchers and layouts |
 | 2026-10-11 | minor | #450: embedded/floating list, selected-component settings, overlay footer and remaining masking gaps |
 | 2026-10-10 | major | Created: measured command and shortcut counts, assessment by area, estimates; moved the shortcut conflicts section here from the checklist |

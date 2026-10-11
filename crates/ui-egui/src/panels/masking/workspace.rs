@@ -2,6 +2,63 @@
 use super::*;
 use serde_json::Value;
 
+struct RowDrag {
+    photo: PhotoId,
+    mask: u32,
+    component: bool,
+    index: usize,
+    before: std::sync::Arc<lightcraft_develop::DevelopSettings>,
+}
+
+fn drag_handle(app: &LightcraftApp, ui: &mut egui::Ui, row: Rect, mask: u32, index: usize, component: bool, enabled: bool) {
+    let t = Tokens::get(ui.ctx());
+    let rect = Rect::from_center_size(pos2(row.right() - 14.0, row.center().y), vec2(24.0, 24.0));
+    let response = ui.interact(rect, ui.id().with(("maskDrag", mask, component, index)), if enabled { Sense::drag() } else { Sense::hover() });
+    register(ui.ctx(), if component { format!("componentDrag:{index}") } else { format!("maskDrag:{mask}") }, rect);
+    paint(ui.painter(), rect.shrink(4.0), Icon::Grip, if enabled { t.text_dim } else { t.text_disabled });
+    if enabled {
+        if response.drag_started()
+            && let Some(photo) = app.session.active()
+            && let Some(before) = app.session.develop_of(photo)
+        {
+            egui::DragAndDrop::set_payload(ui.ctx(), RowDrag { photo, mask, component, index, before });
+        }
+        response.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(crate::i18n::tr("Drag to reorder"));
+    }
+}
+
+fn drop_row(app: &mut LightcraftApp, ui: &mut egui::Ui, response: &egui::Response, mask: u32, index: usize, component: bool) {
+    let Some(drag) = response.dnd_hover_payload::<RowDrag>() else { return };
+    if drag.component != component || (component && drag.mask != mask) || app.session.active() != Some(drag.photo) {
+        return;
+    }
+    // An intervening edit, undo or photo switch must not redirect a stale component index.
+    if app.session.develop_of(drag.photo).is_none_or(|d| d.masks != drag.before.masks) {
+        return;
+    }
+    let Some(pointer) = ui.ctx().pointer_hover_pos() else { return };
+    let after = pointer.y > response.rect.center().y;
+    let slot = index.saturating_add(usize::from(after));
+    let to = slot.saturating_sub(usize::from(drag.index < slot));
+    if to == drag.index {
+        return;
+    }
+    let y = if after { response.rect.bottom() } else { response.rect.top() };
+    let indicator = Rect::from_min_max(pos2(response.rect.left(), y - 1.0), pos2(response.rect.right(), y + 1.0));
+    ui.painter().rect_filled(indicator, 1.0, Tokens::get(ui.ctx()).accent);
+    register(ui.ctx(), "maskReorderTarget", indicator);
+    if response.dnd_release_payload::<RowDrag>().is_some() {
+        let result = if component {
+            app.run("mask.component", json!({"id": drag.mask, "component": drag.index, "action": "move", "to": to}))
+        } else {
+            app.run("mask.move", json!({"id": drag.mask, "to": to}))
+        };
+        if let Err(error) = result {
+            app.toast(ui.ctx(), error);
+        }
+    }
+}
+
 pub fn command(app: &mut LightcraftApp, command: &str, params: &Value) -> Result<Value, String> {
     match command {
         "ui.maskPanel" => {
@@ -95,28 +152,32 @@ pub fn tool_component(app: &LightcraftApp, tool: &str) -> Option<usize> {
     (tool_for(&m.components.get(i)?.shape) == tool).then_some(i)
 }
 
-fn swapped_index(index: usize, from: usize, to: usize) -> usize {
+fn moved_index(index: usize, from: usize, to: usize) -> usize {
     if index == from {
         to
-    } else if index == to {
-        from
+    } else if from < to && index > from && index <= to {
+        index.saturating_sub(1)
+    } else if from > to && index >= to && index < from {
+        index.saturating_add(1)
     } else {
         index
     }
 }
 
-/// Undo/redo of an adjacent swap keeps the same logical component selected.
+/// Undo/redo of a reorder keeps the same logical component selected.
 fn history_component(before: &lightcraft_develop::Mask, after: &lightcraft_develop::Mask, selected: usize) -> usize {
     let (a, b) = (&before.components, &after.components);
     if a.len() != b.len() {
         return selected;
     }
     let Some(from) = a.iter().zip(b).position(|(a, b)| a != b) else { return selected };
-    let Some(to) = from.checked_add(1) else { return selected };
-    if a.get(from) != b.get(to) || a.get(to) != b.get(from) || a.iter().zip(b).enumerate().any(|(i, (a, b))| i != from && i != to && a != b) {
-        return selected;
+    let Some(to) = a.iter().zip(b).rposition(|(a, b)| a != b) else { return selected };
+    for (source, destination) in [(from, to), (to, from)] {
+        if a.iter().enumerate().all(|(i, c)| b.get(moved_index(i, source, destination)) == Some(c)) {
+            return moved_index(selected, source, destination);
+        }
     }
-    swapped_index(selected, from, to)
+    selected
 }
 
 pub fn selection_changed(
@@ -181,7 +242,7 @@ pub fn selection_changed(
                 let from = result.get("from").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
                 let to = result.get("to").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
                 match (from, to) {
-                    (Some(from), Some(to)) => Some(selected.map_or(to, |i| swapped_index(i, from, to))),
+                    (Some(from), Some(to)) => Some(selected.map_or(to, |i| moved_index(i, from, to))),
                     _ => selected,
                 }
             }
@@ -276,8 +337,26 @@ pub(super) fn list(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &lightcraft_de
         let footer = 24.0 + 6.0 + 2.0 * ui.spacing().item_spacing.y;
         let height = if floating { (ui.available_height() - footer).max(100.0) } else { 240.0 };
         egui::ScrollArea::vertical().id_salt(("mask-list", floating)).max_height(height).auto_shrink([false, !floating]).show(ui, |ui| {
+            register(ui.ctx(), "maskReorderViewport", ui.clip_rect());
             for (index, mask) in d.masks.iter().enumerate() {
                 ui.push_id(mask.id, |ui| mask_row(app, ui, mask, index, d.masks.len()));
+            }
+            if egui::DragAndDrop::has_payload_of_type::<RowDrag>(ui.ctx())
+                && let Some(pointer) = ui.ctx().pointer_hover_pos().filter(|p| ui.clip_rect().contains(*p))
+            {
+                let clip = ui.clip_rect();
+                let direction = if pointer.y < clip.top() + 24.0 {
+                    1.0
+                } else if pointer.y > clip.bottom() - 24.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                if direction != 0.0 {
+                    let delta = direction * 240.0 * ui.input(|i| i.stable_dt.min(0.05));
+                    ui.scroll_with_delta_animation(vec2(0.0, delta), egui::style::ScrollAnimation::none());
+                    ui.ctx().request_repaint();
+                }
             }
         });
         ui.separator();
@@ -289,7 +368,7 @@ pub(super) fn list(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &lightcraft_de
 fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::Mask, index: usize, count: usize) {
     let t = Tokens::get(ui.ctx());
     let selected = app.session.active_mask == Some(m.id);
-    egui::Frame::NONE.fill(if selected { t.inset } else { egui::Color32::TRANSPARENT }).corner_radius(4.0).show(ui, |ui| {
+    let group = egui::Frame::NONE.fill(if selected { t.inset } else { egui::Color32::TRANSPARENT }).corner_radius(4.0).show(ui, |ui| {
         let renaming = app.ui.renaming_mask.as_ref().is_some_and(|(rid, _)| *rid == m.id);
         let sense = if renaming { Sense::hover() } else { Sense::click() };
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), sense);
@@ -318,7 +397,7 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
         let elided = if let Some((rid, name)) = app.ui.renaming_mask.as_mut().filter(|(rid, _)| *rid == m.id) {
             let rid = *rid;
             // Place only the name editor inside the fixed row, leaving the matte and actions visible.
-            let name_rect = Rect::from_min_max(pos2(r.left() + 46.0, r.center().y - 12.0), pos2(r.right() - 52.0, r.center().y + 12.0));
+            let name_rect = Rect::from_min_max(pos2(r.left() + 46.0, r.center().y - 12.0), pos2(r.right() - 76.0, r.center().y + 12.0));
             let r = ui.place(
                 name_rect,
                 egui::TextEdit::singleline(name)
@@ -344,7 +423,7 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
             false
         } else {
             let color = if m.visible { t.text } else { t.text_disabled };
-            let g = one_line(ui.painter(), &m.name, t.font(13.0), color, (r.width() - 102.0).max(0.0));
+            let g = one_line(ui.painter(), &m.name, t.font(13.0), color, (r.width() - 126.0).max(0.0));
             let elided = g.elided;
             let at = pos2(r.left() + 50.0, r.center().y - g.size().y / 2.0);
             register(ui.ctx(), format!("maskName:{}", m.id), Rect::from_min_size(at, g.size()));
@@ -352,18 +431,19 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
             elided
         };
         let resp = if elided { resp.on_hover_text(&m.name) } else { resp };
-        let eye_rect = Rect::from_center_size(pos2(r.right() - 14.0, r.center().y), vec2(22.0, 24.0));
+        let eye_rect = Rect::from_center_size(pos2(r.right() - 62.0, r.center().y), vec2(22.0, 24.0));
         let eye = ui.interact(eye_rect, ui.id().with("visible"), Sense::click());
         register(ui.ctx(), format!("maskVisible:{}", m.id), eye_rect);
         paint(ui.painter(), eye_rect.shrink(4.0), if m.visible { Icon::Eye } else { Icon::EyeOff }, t.text_dim);
         if eye.clicked() {
             let _ = app.run("mask.visible", json!({"id": m.id}));
         }
-        let more_rect = eye_rect.translate(vec2(-24.0, 0.0));
+        let more_rect = eye_rect.translate(vec2(24.0, 0.0));
         let more = ui.interact(more_rect, ui.id().with("options"), Sense::click());
         register(ui.ctx(), format!("maskMenu:{}", m.id), more_rect);
         paint(ui.painter(), more_rect.shrink(4.0), Icon::More, t.text_dim);
         egui::Popup::menu(&more).show(|ui| mask_menu(app, ui, m.id, &m.name, m.visible, index, count));
+        drag_handle(app, ui, r, m.id, index, false, !renaming && count > 1);
         if !renaming {
             if resp.clicked() {
                 let _ = app.run("mask.select", json!({"id": m.id}));
@@ -397,6 +477,8 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
             });
         }
     });
+    register(ui.ctx(), format!("maskGroup:{}", m.id), group.response.rect);
+    drop_row(app, ui, &group.response, m.id, index, false);
 }
 
 fn component_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::Mask, i: usize, c: &lightcraft_develop::MaskComponent) {
@@ -444,7 +526,7 @@ fn component_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_deve
     let text = format!("{label}{}", if c.invert { crate::i18n::tr(" (inverted)") } else { "" });
     if let Some((_, _, name)) = app.ui.renaming_component.as_mut().filter(|(mid, k, _)| *mid == m.id && *k == i) {
         // Keep the row, kind icon, operation badge and menu in place; only the name is editable.
-        let name_rect = Rect::from_min_max(pos2(text_left - 4.0, r.center().y - 12.0), pos2(r.right() - 30.0, r.center().y + 12.0));
+        let name_rect = Rect::from_min_max(pos2(text_left - 4.0, r.center().y - 12.0), pos2(r.right() - 54.0, r.center().y + 12.0));
         let r = ui.place(
             name_rect,
             egui::TextEdit::singleline(name)
@@ -468,14 +550,16 @@ fn component_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_deve
             }
         }
     } else {
-        let g = one_line(ui.painter(), &text, t.font(12.5), t.text_label, (r.right() - 30.0 - text_left).max(0.0));
+        let g = one_line(ui.painter(), &text, t.font(12.5), t.text_label, (r.right() - 54.0 - text_left).max(0.0));
         ui.painter().galley(pos2(text_left, r.center().y - g.size().y / 2.0), g, t.text_label);
     }
-    let more_rect = Rect::from_center_size(pos2(r.right() - 14.0, r.center().y), vec2(24.0, 24.0));
+    let more_rect = Rect::from_center_size(pos2(r.right() - 38.0, r.center().y), vec2(24.0, 24.0));
     let more = ui.interact(more_rect, ui.id().with(("componentMenu", i)), Sense::click());
     register(ui.ctx(), format!("button:componentMenu{i}"), more_rect);
     paint(ui.painter(), more_rect.shrink(4.0), Icon::More, t.text_dim);
     egui::Popup::menu(&more).show(|ui| component_row_menu(app, ui, m.id, i, &label, m.components.len()));
+    drag_handle(app, ui, r, m.id, i, true, !renaming && m.components.len() > 1);
+    drop_row(app, ui, &resp, m.id, i, true);
     if !renaming {
         if resp.clicked() {
             let _ = app.run("mask.selectComponent", json!({"id": m.id, "component": i}));

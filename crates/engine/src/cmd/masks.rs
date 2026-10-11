@@ -153,21 +153,35 @@ fn find(masks: &mut [Mask], id: u32, c: &str) -> Result<usize> {
 
 fn move_component(s: &mut Session, p: &Value, mask: u32, from: usize) -> Result<Value> {
     let c = "mask.component";
-    let delta = p.get("delta").and_then(Value::as_i64).filter(|d| matches!(d, -1 | 1)).ok_or_else(|| bad(c, "move needs delta -1 or 1"))?;
     let photo = s.active().ok_or_else(|| bad(c, "no active photo"))?;
     let d = s.develop_of(photo).ok_or_else(|| bad(c, "no active photo"))?;
     let components = &d.masks.iter().find(|m| m.id == mask).ok_or_else(|| bad(c, "no such mask"))?.components;
     components.get(from).ok_or_else(|| bad(c, "no such component"))?;
-    let to = if delta < 0 { from.checked_sub(1) } else { from.checked_add(1).filter(|i| *i < components.len()) }.unwrap_or(from);
+    let to = match (p.get("to"), p.get("delta")) {
+        (Some(value), None) => value
+            .as_u64()
+            .and_then(|v| usize::try_from(v).ok())
+            .filter(|i| *i < components.len())
+            .ok_or_else(|| bad(c, "to must be an existing component index"))?,
+        (None, Some(value)) => {
+            let delta = value.as_i64().filter(|d| matches!(d, -1 | 1)).ok_or_else(|| bad(c, "move needs delta -1 or 1"))?;
+            if delta < 0 { from.checked_sub(1) } else { from.checked_add(1).filter(|i| *i < components.len()) }.unwrap_or(from)
+        }
+        _ => return Err(bad(c, "move needs either to or delta")),
+    };
     if to != from {
         // A click job stores a component index; don't let its result land on a different Object.
-        if s.segmenter.pending_clicks().is_some_and(|q| q.photo == photo && q.mask == mask && (q.comp == from || q.comp == to)) {
+        if s.segmenter.pending_clicks().is_some_and(|q| q.photo == photo && q.mask == mask && (from.min(to)..=from.max(to)).contains(&q.comp)) {
             return Err(bad(c, "wait for the object selection to finish before moving this component"));
         }
         masks_edit(s, c, "Move Component", |masks, _| {
             let components = &mut masks.iter_mut().find(|m| m.id == mask).ok_or_else(|| bad(c, "no such mask"))?.components;
-            let pair = components.get_mut(from.min(to)..=from.max(to)).ok_or_else(|| bad(c, "no such component"))?;
-            pair.rotate_left(1);
+            let range = components.get_mut(from.min(to)..=from.max(to)).ok_or_else(|| bad(c, "no such component"))?;
+            if from < to {
+                range.rotate_left(1);
+            } else {
+                range.rotate_right(1);
+            }
             Ok(())
         })?;
     }
@@ -627,7 +641,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Mask Component",
             [],
             None,
-            "{id?, component: index, action: invert|duplicate|delete|rename|op|move, name? (rename; empty clears), op?: add|subtract|intersect, delta?: -1|1 (move)} — one component of a mask; move returns {mask, from, to}, boundaries are a no-op; deleting the last component deletes the mask",
+            "{id?, component: index, action: invert|duplicate|delete|rename|op|move, name? (rename; empty clears), op?: add|subtract|intersect, delta?: -1|1 OR to?: index (move)} — one component of a mask; move returns {mask, from, to}, delta boundaries are a no-op; deleting the last component deletes the mask",
             has_active,
             |s, p| {
                 let c = "mask.component";

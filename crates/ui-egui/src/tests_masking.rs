@@ -1368,6 +1368,112 @@ fn ai_masks_without_the_model_offer_the_download() {
 }
 
 #[test]
+fn masking_drag_handles_reorder_rows_once_and_preserve_selection() {
+    fn drag(h: &mut Headless, source: &str, target: &str, after: bool) {
+        let rect = h.app.widgets.iter().find(|(id, _)| id == target).unwrap().1;
+        let r = h.request(
+            "ui.dragWidget",
+            json!({"id": source, "toX": rect.center().x, "toY": if after { rect.bottom() - 3.0 } else { rect.top() + 3.0 }, "steps": 12}),
+            T,
+        );
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    for floating in [false, true] {
+        let mut h = detail("panel.masking");
+        exec(&mut h, "mask.add", json!({"kind": "linear"}));
+        exec(&mut h, "mask.addComponent", json!({"kind": "radial", "op": "subtract"}));
+        exec(&mut h, "mask.addComponent", json!({"kind": "brush", "op": "intersect"}));
+        exec(&mut h, "ui.maskPanel", json!({"floating": floating}));
+        let before = develop(&h);
+        let undo = h.app.session.undo.len();
+        let menu = h.app.widgets.iter().find(|(id, _)| id == "button:componentMenu2").unwrap().1;
+        let grip = h.app.widgets.iter().find(|(id, _)| id == "componentDrag:2").unwrap().1;
+        assert!(grip.left() >= menu.right(), "the grip is to the right of the ellipsis");
+        drag(&mut h, "componentDrag:2", "component:0", false);
+        let mut moved = before.clone();
+        moved.masks[0].components.rotate_right(1);
+        assert_eq!(develop(&h), moved);
+        assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(0));
+        assert_eq!(h.app.ui.tool, "brush");
+        assert_eq!(h.app.session.undo.len(), undo + 1, "one drag, one undo entry");
+        exec(&mut h, "edit.undo", json!({}));
+        assert_eq!(develop(&h), before);
+        assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(2));
+        exec(&mut h, "edit.redo", json!({}));
+        assert_eq!(develop(&h), moved);
+        assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(0));
+        drag(&mut h, "componentDrag:0", "component:2", true);
+        assert_eq!(develop(&h), before);
+        assert_eq!(h.app.ui.mask_component.map(|(_, _, i)| i), Some(2));
+        let undo = h.app.session.undo.len();
+        drag(&mut h, "componentDrag:2", "component:2", false);
+        assert_eq!(h.app.session.undo.len(), undo, "dropping on itself is a no-op");
+        let canvas = h.app.image_rect.unwrap().center();
+        h.request("ui.dragWidget", json!({"id": "componentDrag:2", "toX": canvas.x, "toY": canvas.y}), T);
+        assert_eq!(develop(&h), before, "outside drop never paints through or moves a component");
+        exec(&mut h, "mask.add", json!({"kind": "radial", "name": "Other"}));
+        let before = develop(&h);
+        let undo = h.app.session.undo.len();
+        drag(&mut h, "maskDrag:1", "maskGroup:2", true);
+        let mut moved = before.clone();
+        moved.masks.swap(0, 1);
+        assert_eq!(develop(&h), moved, "mask drag moves the whole group");
+        assert_eq!(h.app.session.active_mask, Some(2));
+        assert_eq!(h.app.session.undo.len(), undo + 1);
+        exec(&mut h, "edit.undo", json!({}));
+        assert_eq!(develop(&h), before);
+        exec(&mut h, "edit.redo", json!({}));
+        assert_eq!(develop(&h), moved);
+    }
+}
+
+#[test]
+fn masking_drag_scroll_cancel_and_stale_drop_preserve_edits() {
+    fn rect(h: &Headless, key: &str) -> egui::Rect {
+        h.app.widgets.iter().find(|(id, _)| id == key).unwrap().1
+    }
+    fn event(h: &mut Headless, kind: &str, point: egui::Pos2) {
+        let image = h.app.image_rect.unwrap();
+        let p = (point - image.min) / image.size();
+        pointer(h, json!([{"kind": kind, "x": p.x, "y": p.y}]));
+    }
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "linear"}));
+    for _ in 0..8 {
+        exec(&mut h, "mask.addComponent", json!({"kind": "brush"}));
+    }
+    let before = develop(&h);
+    let undo = h.app.session.undo.len();
+    let source = rect(&h, "componentDrag:0").center();
+    let viewport = rect(&h, "maskReorderViewport");
+    let edge = egui::pos2(source.x, viewport.bottom() - 3.0);
+    event(&mut h, "down", source);
+    event(&mut h, "move", edge);
+    for _ in 0..100 {
+        h.step();
+    }
+    let last = rect(&h, "component:8");
+    assert!(viewport.contains(last.center()), "dragging near the edge scrolls the last row into view");
+    assert_eq!(develop(&h), before, "previewing an insertion never changes the document");
+    event(&mut h, "move", last.center());
+    h.request("ui.key", json!({"key": "Escape"}), T);
+    event(&mut h, "up", last.center());
+    assert_eq!(develop(&h), before);
+    assert_eq!(h.app.session.undo.len(), undo);
+    assert_eq!(h.app.ui.view, crate::state::ViewMode::Detail);
+    // Grab a visible row, edit the mask through a command, then release at a new position.
+    let source = rect(&h, "componentDrag:8").center();
+    let target = rect(&h, "component:5").center();
+    event(&mut h, "down", source);
+    event(&mut h, "move", target);
+    exec(&mut h, "mask.component", json!({"component": 8, "action": "rename", "name": "Changed while dragging"}));
+    let changed = develop(&h);
+    event(&mut h, "up", target);
+    assert_eq!(develop(&h), changed, "stale source indices are never applied after an edit");
+    assert_eq!(h.app.session.undo.len(), undo + 1);
+}
+
+#[test]
 fn masking_component_move_menu_keeps_selection_and_undo_targets() {
     for floating in [false, true] {
         let mut h = detail("panel.masking");
