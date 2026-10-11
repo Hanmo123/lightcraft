@@ -285,6 +285,56 @@ fn masking_component_menus_offer_all_creation_kinds_and_preserve_the_operation()
 }
 
 #[test]
+fn masking_parent_menus_combine_with_the_clicked_mask() {
+    for floating in [false, true] {
+        let mut h = detail("panel.masking");
+        exec(&mut h, "mask.add", json!({"kind": "linear"}));
+        exec(&mut h, "mask.add", json!({"kind": "radial"}));
+        exec(&mut h, "ui.maskPanel", json!({"floating": floating}));
+        let before = develop(&h);
+        for context in [true, false] {
+            for op in ["intersect", "subtract"] {
+                for kind in ["brush", "colorRange"] {
+                    exec(&mut h, "mask.select", json!({"id": 2}));
+                    let undo = h.app.session.undo.len();
+                    let r = h.request(
+                        "ui.clickWidget",
+                        if context { json!({"id": "mask:1", "button": "right"}) } else { json!({"id": "maskMenu:1"}) },
+                        T,
+                    );
+                    assert_eq!(r["ok"], true, "{r}");
+                    click(&mut h, &format!("maskCombineMenu:1:{op}"));
+                    for kind in ["object", "prompt", "subject", "sky", "background", "brush", "linear", "radial", "luminanceRange", "colorRange"] {
+                        assert!(h.app.widgets.iter().any(|(id, _)| id == &format!("maskComp:{op}:{kind}")), "missing {op}/{kind}");
+                    }
+                    assert_eq!(develop(&h), before, "opening the submenu never edits the photo");
+                    assert_eq!(h.app.session.active_mask, Some(2), "opening another mask's menu preserves selection");
+                    click(&mut h, &format!("maskComp:{op}:{kind}"));
+                    let after = develop(&h);
+                    assert_eq!(after.masks.len(), 2);
+                    assert_eq!(after.masks[1], before.masks[1], "the previously selected mask stays unchanged");
+                    assert_eq!(after.masks[0].components.len(), 2);
+                    assert_eq!(after.masks[0].components[0], before.masks[0].components[0]);
+                    let added = &after.masks[0].components[1];
+                    assert_eq!(serde_json::to_value(added.op).unwrap(), op);
+                    assert_eq!(serde_json::to_value(&added.shape).unwrap()["kind"], kind);
+                    assert_eq!(h.app.session.active_mask, Some(1));
+                    assert_eq!(h.app.ui.mask_component.map(|(_, mask, i)| (mask, i)), Some((1, 1)));
+                    assert_eq!(h.app.ui.tool, kind);
+                    assert_eq!(h.app.session.undo.len(), undo + 1);
+                    assert!(!h.app.widgets.iter().any(|(id, _)| id.starts_with("maskComp:")), "choosing a type closes the menu");
+                    exec(&mut h, "edit.undo", json!({}));
+                    assert_eq!(develop(&h), before);
+                    exec(&mut h, "edit.redo", json!({}));
+                    assert_eq!(develop(&h), after);
+                    exec(&mut h, "edit.undo", json!({}));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn masking_intersection_color_range_samples_the_selected_component_on_canvas() {
     let mut h = detail("panel.masking");
     exec(&mut h, "mask.add", json!({"kind": "colorRange", "samples": [[50, 0, 0]]}));

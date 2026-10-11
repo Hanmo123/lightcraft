@@ -470,7 +470,7 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
                             .on_hover_text(label);
                         register(ui.ctx(), format!("button:{key}:{}", m.id), button.rect);
                         register(ui.ctx(), format!("button:{alias}"), button.rect);
-                        egui::Popup::menu(&button).show(|ui| component_menu(app, ui, op));
+                        egui::Popup::menu(&button).show(|ui| component_menu(app, ui, m.id, op));
                     }
                 });
                 describe_field(app, ui, false);

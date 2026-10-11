@@ -333,6 +333,11 @@ fn mask_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, id: u32, name: &str, vi
     run(ui, "Move Up", index > 0, "mask.move", json!({"id": id, "delta": -1}));
     run(ui, "Move Down", index + 1 < count, "mask.move", json!({"id": id, "delta": 1}));
     ui.separator();
+    for (op, label) in [("intersect", "Intersect with"), ("subtract", "Subtract")] {
+        let menu = ui.menu_button(crate::i18n::tr(label), |ui| component_menu(app, ui, id, op));
+        register(ui.ctx(), format!("maskCombineMenu:{id}:{op}"), menu.response.rect);
+    }
+    ui.separator();
     if ui.button(crate::i18n::tr("Rename…")).clicked() {
         app.ui.renaming_mask = Some((id, name.to_string()));
         ui.close();
@@ -586,7 +591,7 @@ fn component_row_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, mask: u32, k: 
         });
     }
     for (op, label) in [("intersect", "Intersect with"), ("subtract", "Subtract")] {
-        let menu = ui.menu_button(crate::i18n::tr(label), |ui| component_menu(app, ui, op));
+        let menu = ui.menu_button(crate::i18n::tr(label), |ui| component_menu(app, ui, mask, op));
         register(ui.ctx(), format!("maskComponentMenu:{k}:{op}"), menu.response.rect);
     }
     ui.separator();
@@ -724,7 +729,7 @@ fn describe_field(app: &mut LightcraftApp, ui: &mut egui::Ui, new_mask: bool) {
     }
 }
 
-fn component_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, op: &str) {
+fn component_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, mask: u32, op: &str) {
     ui.set_min_width(180.0);
     for &(kind, label) in MASK_KINDS {
         if kind == "brush" || kind == "luminanceRange" {
@@ -734,6 +739,15 @@ fn component_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, op: &str) {
         let b = ui.add(egui::Button::new(crate::i18n::tr(label)).min_size(vec2(0.0, 26.0)));
         register(ui.ctx(), format!("maskComp:{op}:{kind}"), b.rect);
         if b.clicked() {
+            // A parent menu can belong to an unselected mask. Select its target only
+            // when choosing a type, so opening or dismissing the menu changes nothing.
+            if app.session.active_mask != Some(mask)
+                && let Err(error) = app.run("mask.select", json!({"id": mask}))
+            {
+                app.toast(ui.ctx(), error);
+                ui.close();
+                return;
+            }
             match kind {
                 "object" => start_object(app, ui.ctx(), op),
                 "prompt" => start_describe(app, op),

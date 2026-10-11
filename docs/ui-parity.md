@@ -57,7 +57,10 @@ Add/Erase and Auto Mask apply to subsequent strokes. Add/Subtract occupy equal h
 selected mask’s action row, with larger hit areas and spacing above. Component settings lead
 into the local adjustment sliders under a small **Mask Adjustments** heading, without a
 duplicate mask-name/invert row. Add, Subtract and Intersect with offer the same ten types as
-new-mask creation, with localized labels. An intersection brush keeps only painted overlap;
+new-mask creation, with localized labels. Both mask and component right-click/ellipsis menus
+offer Intersect with and Subtract; choosing a type targets the menu’s mask, including an
+unselected mask, and selects its new component. Opening the menu preserves selection and edits.
+An intersection brush keeps only painted overlap;
 Erase removes paint from that brush component. Color Range samples the selected component
 when clicking the photo in the Masking panel; Shift-click adds a sample. Subtract and Intersect
 indicators use separate rounded-square badges before the component name, with descriptive hover text.
@@ -116,6 +119,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-11 | minor | #450: parent mask menus expose Intersect with/Subtract and target the clicked mask |
 | 2026-10-11 | minor | #450: mask/component drag handles, insertion feedback, edge scrolling and one-step undo |
 | 2026-10-11 | minor | #450: fix overlay mode/custom-colour submenus closing the settings popup; verify both launchers and layouts |
 | 2026-10-11 | minor | #450: embedded/floating list, selected-component settings, overlay footer and remaining masking gaps |
