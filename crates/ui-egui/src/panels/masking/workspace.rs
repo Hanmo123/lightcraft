@@ -102,13 +102,17 @@ pub fn command(app: &mut LightcraftApp, command: &str, params: &Value) -> Result
             let density = number("density", app.ui.brush_density, 0.0, 100.0)?;
             let erase = flag("erase", app.ui.brush_erase)?;
             let auto_mask = flag("autoMask", app.ui.brush_auto_mask)?;
+            let pressure = flag("pressure", app.ui.brush_pressure)?;
             app.ui.brush_size = size;
             app.ui.brush_feather = feather;
             app.ui.brush_flow = flow;
             app.ui.brush_density = density;
             app.ui.brush_erase = erase;
             app.ui.brush_auto_mask = auto_mask;
-            Ok(json!({"size": size, "feather": feather, "flow": flow, "density": density, "erase": erase, "autoMask": auto_mask}))
+            app.ui.brush_pressure = pressure;
+            Ok(
+                json!({"size": size, "feather": feather, "flow": flow, "density": density, "erase": erase, "autoMask": auto_mask, "pressure": pressure}),
+            )
         }
         _ => Err(format!("Unknown masking UI command: {command}")),
     }
@@ -152,6 +156,22 @@ pub fn tool_component(app: &LightcraftApp, tool: &str) -> Option<usize> {
     (tool_for(&m.components.get(i)?.shape) == tool).then_some(i)
 }
 
+/// Brush activation shares the canvas fallback, but makes that target explicit in the list.
+/// With no brush yet, clear the old row and let the first stroke create one as before.
+pub fn select_brush(app: &mut LightcraftApp) -> Result<(), String> {
+    let target = app.session.active().and_then(|photo| app.session.develop_of(photo)).and_then(|d| {
+        let mask = d.masks.iter().find(|m| Some(m.id) == app.session.active_mask)?;
+        let index = tool_component(app, "brush").or_else(|| mask.components.iter().rposition(|c| matches!(c.shape, MaskShape::Brush { .. })))?;
+        Some((mask.id, index))
+    });
+    if let Some((mask, index)) = target {
+        command_select(app, mask, index)?;
+    } else {
+        app.ui.mask_component = None;
+    }
+    Ok(())
+}
+
 fn moved_index(index: usize, from: usize, to: usize) -> usize {
     if index == from {
         to
@@ -164,10 +184,24 @@ fn moved_index(index: usize, from: usize, to: usize) -> usize {
     }
 }
 
-/// Undo/redo of a reorder keeps the same logical component selected.
+/// Follow surviving rows through undo/redo of insertion, deletion and reordering.
 fn history_component(before: &lightcraft_develop::Mask, after: &lightcraft_develop::Mask, selected: usize) -> usize {
     let (a, b) = (&before.components, &after.components);
     if a.len() != b.len() {
+        let prefix = a.iter().zip(b).take_while(|(a, b)| a == b).count();
+        if b.len() > a.len() {
+            let added = b.len() - a.len();
+            if selected >= prefix && a.iter().skip(prefix).eq(b.iter().skip(prefix.saturating_add(added))) {
+                return selected.saturating_add(added);
+            }
+        } else {
+            let removed = a.len() - b.len();
+            if selected >= prefix && a.iter().skip(prefix.saturating_add(removed)).eq(b.iter().skip(prefix)) {
+                // If the selected row itself disappeared, choose its next surviving neighbour
+                // (the caller clamps at the end), rather than redirecting an earlier row.
+                return selected.saturating_sub(removed).max(prefix);
+            }
+        }
         return selected;
     }
     let Some(from) = a.iter().zip(b).position(|(a, b)| a != b) else { return selected };
@@ -191,6 +225,7 @@ pub fn selection_changed(
         command,
         "mask.add"
             | "mask.addComponent"
+            | "mask.brushStroke"
             | "mask.select"
             | "mask.delete"
             | "mask.deleteAll"
@@ -237,6 +272,7 @@ pub fn selection_changed(
     let changed = params.get("component").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
     let preferred = match command {
         "mask.add" | "mask.addComponent" | "mask.duplicate" => None,
+        "mask.brushStroke" => changed.or_else(|| m.components.iter().rposition(|c| matches!(c.shape, MaskShape::Brush { .. }))),
         "mask.component" => match (action, changed, previous) {
             (Some("move"), _, selected) => {
                 let from = result.get("from").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
@@ -315,6 +351,10 @@ pub(super) fn list(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &lightcraft_de
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let plus = icon_button(ui, "maskCreate", Icon::Plus, vec2(24.0, 24.0), false, true, "Create New Mask");
                 egui::Popup::menu(&plus).show(|ui| create_menu(app, ui));
+                let all = app.ui.mask_overlay_all;
+                if icon_button(ui, "maskOverlayAll", Icon::Stack, vec2(24.0, 24.0), all, true, "Show all overlays").clicked() {
+                    let _ = app.run("view.maskOverlayAll", json!({}));
+                }
                 if icon_button(
                     ui,
                     "maskPanelArrange",
@@ -372,6 +412,7 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
         let renaming = app.ui.renaming_mask.as_ref().is_some_and(|(rid, _)| *rid == m.id);
         let sense = if renaming { Sense::hover() } else { Sense::click() };
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), sense);
+        crate::widgets::announce_selected(&resp, m.name.clone(), selected);
         register(ui.ctx(), format!("mask:{}", m.id), r);
         if resp.hovered() {
             ui.painter().rect_filled(r, 4.0, t.hover.gamma_multiply(0.5));
@@ -433,6 +474,7 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
         let resp = if elided { resp.on_hover_text(&m.name) } else { resp };
         let eye_rect = Rect::from_center_size(pos2(r.right() - 62.0, r.center().y), vec2(22.0, 24.0));
         let eye = ui.interact(eye_rect, ui.id().with("visible"), Sense::click());
+        crate::widgets::announce_selected(&eye, crate::i18n::tr("Show mask"), m.visible);
         register(ui.ctx(), format!("maskVisible:{}", m.id), eye_rect);
         paint(ui.painter(), eye_rect.shrink(4.0), if m.visible { Icon::Eye } else { Icon::EyeOff }, t.text_dim);
         if eye.clicked() {
@@ -495,6 +537,7 @@ fn component_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_deve
     let renaming = app.ui.renaming_component.as_ref().is_some_and(|(mid, k, _)| *mid == m.id && *k == i);
     let sense = if renaming { Sense::hover() } else { Sense::click() };
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), sense);
+    crate::widgets::announce_selected(&resp, label.clone(), selected);
     register(ui.ctx(), format!("component:{i}"), r);
     ui.painter().rect_filled(
         r,

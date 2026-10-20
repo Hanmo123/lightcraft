@@ -140,6 +140,24 @@ fn png_metadata_and_gray_alpha() {
     assert!((a - 128.0 / 255.0).abs() < 1e-6);
 }
 
+/// The working image has no alpha: transparency is flattened onto white, in linear light (issue #1212:
+/// transparent areas, stored black, rendered black).
+#[test]
+fn png_transparency_develops_on_white() {
+    // opaque red, transparent black (as most encoders store it), half-transparent red
+    let data = [200, 40, 40, 255, 0, 0, 0, 0, 200, 40, 40, 128];
+    let bytes = encode_png(&EncodeImage::new(3, 1, 4, Samples::U8(&data)), &EncodeMeta::default()).unwrap();
+    let d = decode(&bytes, DecodeOptions::default()).unwrap();
+    assert!(d.has_alpha);
+    let opaque = encode_png(&EncodeImage::new(1, 1, 3, Samples::U8(&[200, 40, 40])), &EncodeMeta::default()).unwrap();
+    let red = decode(&opaque, DecodeOptions::default()).unwrap().to_working().get(0, 0);
+    let w = d.to_working();
+    let a = 128.0 / 255.0;
+    for (got, want) in [(w.get(0, 0), red), (w.get(1, 0), [1.0; 3]), (w.get(2, 0), red.map(|c| a * c + (1.0 - a)))] {
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-5), "{got:?} != {want:?}");
+    }
+}
+
 #[test]
 fn p3_icc_to_working() {
     let icc = write_named(NamedSpace::DisplayP3);
@@ -243,6 +261,90 @@ fn tiff_cmyk_and_orientation() {
     let red = d.image.get(1, 0);
     assert!(white.iter().all(|&v| (v - 1.0).abs() < 1e-5), "{white:?}");
     assert!(red[0] > 0.99 && red[1] < 0.01 && red[2] < 0.01, "{red:?}");
+}
+
+/// An uncompressed 16-bit RGB export in a single strip, the shape of the file in #1983 (3923 × 5877,
+/// 138 MB). Its one strip is larger than the `tiff` crate's default 128 MiB intermediate buffer, so
+/// the thumbnail (and the full decode) failed with "decoder limits exceeded".
+#[test]
+fn tiff_single_strip_larger_than_128_mib() {
+    use tiff::encoder::{TiffEncoder, colortype};
+    let (w, h) = (3923u32, 5877u32);
+    let mut cur = std::io::Cursor::new(Vec::new());
+    {
+        let mut enc = TiffEncoder::new(&mut cur).unwrap();
+        let mut im = enc.new_image::<colortype::RGB16>(w, h).unwrap();
+        im.rows_per_strip(h).unwrap();
+        im.write_data(&vec![0x8000u16; (w * h * 3) as usize]).unwrap();
+    }
+    let bytes = cur.into_inner();
+    assert!(bytes.len() > 128 << 20);
+    let t = decode_thumbnail(&bytes, 256).unwrap();
+    assert_eq!((t.source_width, t.source_height), (w, h));
+    let px = t.image.get(10, 10);
+    assert!(px[0].abs_diff(128) <= 2 && px[0] == px[1] && px[1] == px[2], "{px:?}");
+}
+
+/// A little-endian TIFF with one IFD of single-value `(tag, type, value)` entries, followed by `data`.
+fn ifd_tiff(entries: &[(u16, u16, u32)], data: &[u8]) -> Vec<u8> {
+    let mut b = b"II*\0".to_vec();
+    b.extend(8u32.to_le_bytes());
+    b.extend((entries.len() as u16).to_le_bytes());
+    for &(tag, ty, value) in entries {
+        b.extend(tag.to_le_bytes());
+        b.extend(ty.to_le_bytes());
+        b.extend(1u32.to_le_bytes());
+        b.extend(value.to_le_bytes());
+    }
+    b.extend(0u32.to_le_bytes());
+    b.extend_from_slice(data);
+    b
+}
+
+/// A strip or tile can be larger than the pixels it shows (a JPEG header, padding to the tile size), so
+/// a small `max_pixels` must not shrink the intermediate buffer below the `tiff` crate's 128 MiB
+/// default. Both files below were refused with "decoder limits exceeded" when the buffer was capped at
+/// 32 bytes per allowed pixel. Fixtures from AlexChambers' review of #1989.
+#[test]
+fn tiff_small_pixel_budget_reads_headers_and_padded_tiles() {
+    let opts = |max_pixels| DecodeOptions { max_size: None, max_pixels };
+
+    // 1 × 1 gray, one JPEG-compressed strip (~400 bytes for one pixel), with a one-pixel budget.
+    let mut jpeg = Vec::new();
+    jpeg_encoder::Encoder::new(&mut jpeg, 90).encode(&[128], 1, 1, jpeg_encoder::ColorType::Luma).unwrap();
+    let at = 8 + 2 + 10 * 12 + 4;
+    let entries = [
+        (256, 4, 1),
+        (257, 4, 1),
+        (258, 3, 8),
+        (259, 3, 7),
+        (262, 3, 1),
+        (273, 4, at),
+        (277, 3, 1),
+        (278, 4, 1),
+        (279, 4, jpeg.len() as u32),
+        (284, 3, 1),
+    ];
+    let d = decode(&ifd_tiff(&entries, &jpeg), opts(1)).unwrap();
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+
+    // 16 × 16 gray stored in one 256 × 256 tile (64 KiB), with a budget of exactly 256 pixels.
+    let at = 8 + 2 + 11 * 12 + 4;
+    let entries = [
+        (256, 4, 16),
+        (257, 4, 16),
+        (258, 3, 8),
+        (259, 3, 1),
+        (262, 3, 1),
+        (277, 3, 1),
+        (284, 3, 1),
+        (322, 4, 256),
+        (323, 4, 256),
+        (324, 4, at),
+        (325, 4, 65536),
+    ];
+    let d = decode(&ifd_tiff(&entries, &[128; 65536]), opts(256)).unwrap();
+    assert_eq!((d.image.width, d.image.height), (16, 16));
 }
 
 /// A one-strip, uncompressed, single-sample TIFF (little-endian) whose samples are `bits` wide and
@@ -634,4 +736,199 @@ fn print_resolution_is_written() {
     // without a ppi: JFIF density stays an aspect ratio
     let j = encode_jpeg(&img, 90, ChromaSubsampling::S444, &EncodeMeta::default()).unwrap();
     assert_eq!(&j[13..18], &[0, 0, 1, 0, 1]);
+}
+
+#[test]
+fn pq_png_is_16_bit_rec2020_pq_with_cicp_and_content_light() {
+    // linear Rec. 2020, SDR white at 1.0, up to 8x SDR white along x
+    let (w, h) = (64u32, 4u32);
+    let rgb: Vec<f32> = (0..w * h)
+        .flat_map(|i| {
+            let v = 0.01 * 1.11f32.powi((i % w) as i32);
+            [v, v * 0.5, v * 0.25]
+        })
+        .collect();
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#;
+    let bytes = encode_png_pq(w, h, &rgb, &EncodeMeta { xmp: Some(xmp), ppi: Some(240), ..Default::default() }).unwrap();
+    let mut r = png::Decoder::new(std::io::Cursor::new(bytes.as_slice())).read_info().unwrap();
+    let cicp = r.info().coding_independent_code_points.expect("cICP");
+    assert_eq!((cicp.color_primaries, cicp.transfer_function), (9, 16), "BT.2020, PQ");
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    let f = r.next_frame(&mut buf).unwrap();
+    assert_eq!((f.bit_depth, f.color_type, f.width, f.height), (png::BitDepth::Sixteen, png::ColorType::Rgb, w, h));
+    // every sample decodes back to its luminance
+    for x in [0usize, 20, 63] {
+        for c in 0..3 {
+            let o = (x * 3 + c) * 2;
+            let e = u16::from_be_bytes([buf[o], buf[o + 1]]) as f32 / 65535.0;
+            let want = rgb[x * 3 + c] * HDR_REFERENCE_WHITE_NITS;
+            assert!((encode::pq_decode(e) - want).abs() <= want * 0.01 + 0.01, "x {x} c {c}: {} vs {want}", encode::pq_decode(e));
+        }
+    }
+    // cLLI: MaxCLL is the brightest channel, in 0.0001 cd/m²
+    let at = bytes.windows(4).position(|w| w == b"cLLI").expect("cLLI");
+    let max_cll = u32::from_be_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as f32 / 10_000.0;
+    let brightest = rgb.iter().copied().fold(0.0f32, f32::max) * HDR_REFERENCE_WHITE_NITS;
+    assert!((max_cll - brightest.ceil()).abs() <= 1.0, "{max_cll} vs {brightest}");
+    assert!(bytes.windows(17).any(|w| w == b"XML:com.adobe.xmp"), "XMP kept");
+    assert!(bytes.windows(4).any(|w| w == b"pHYs"), "print resolution kept");
+    assert!(!bytes.windows(4).any(|w| w == b"iCCP"), "no ICC profile next to cICP");
+}
+
+#[test]
+fn pq_png_rejects_short_buffers_and_survives_hostile_samples() {
+    assert!(encode_png_pq(4, 4, &[1.0; 3], &EncodeMeta::default()).is_err());
+    assert!(encode_png_pq(0, 4, &[], &EncodeMeta::default()).is_err());
+    assert!(encode_png_pq(u32::MAX, u32::MAX, &[], &EncodeMeta::default()).is_err());
+    let hostile = [f32::NAN, f32::INFINITY, -5.0, 1e30, 0.5, 2.0];
+    assert!(encode_png_pq(2, 1, &hostile, &EncodeMeta::default()).is_ok());
+}
+
+/// Largest per-channel difference between two linear images.
+fn max_diff(a: &lightcraft_raster::Rgb32f, b: &lightcraft_raster::Rgb32f) -> f32 {
+    a.data.iter().zip(&b.data).flat_map(|(p, q)| (0..3).map(move |c| (p[c] - q[c]).abs())).fold(0.0, f32::max)
+}
+
+#[test]
+#[cfg(feature = "jxl")]
+fn jxl_lossless_exact_with_metadata() {
+    let img = gradient(97, 61);
+    let icc = write_named(NamedSpace::Srgb);
+    let exif = minimal_exif(1);
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF/></x:xmpmeta>"#;
+    let meta = EncodeMeta { icc: Some(&icc), exif: Some(&exif), xmp: Some(xmp), ..Default::default() };
+    let o = JxlOptions { lossless: true, ..Default::default() };
+    let b = encode_jxl(&EncodeImage::rgba8(&img), &o, &meta).unwrap();
+    assert_eq!(sniff(&b), Some(Format::Jxl));
+    let d = decode(&b, DecodeOptions::default()).unwrap();
+    assert_eq!((d.width, d.height), (97, 61));
+    assert!(!d.has_alpha, "opaque alpha is dropped");
+    assert_eq!(d.icc.as_deref(), Some(&icc[..]));
+    assert_eq!(d.exif.as_deref(), Some(&exif[..]));
+    assert_eq!(d.xmp.as_deref(), Some(xmp));
+    assert_eq!(d.to_srgb8().data, img.data, "lossless round trip is exact");
+
+    // 16-bit lossless keeps every code value
+    let px: Vec<u16> = (0..40 * 30 * 3).map(|i| (i as u32 * 2741 % 65536) as u16).collect();
+    let b = encode_jxl(&EncodeImage::new(40, 30, 3, Samples::U16(&px)), &o, &meta).unwrap();
+    let d = decode(&b, DecodeOptions::default()).unwrap();
+    assert_eq!(d.bit_depth, 16);
+    let png = encode_png(&EncodeImage::new(40, 30, 3, Samples::U16(&px)), &meta).unwrap();
+    let want = decode(&png, DecodeOptions::default()).unwrap();
+    assert!(max_diff(&d.image, &want.image) < 1e-5, "16-bit lossless differs by {}", max_diff(&d.image, &want.image));
+}
+
+/// #1517: the pixel limit rejects an oversized image; selected truncations never panic.
+#[test]
+#[cfg(all(feature = "jxl", not(target_arch = "wasm32")))]
+fn jxl_size_limit_and_truncation() {
+    let b = encode_jxl(&EncodeImage::rgba8(&gradient(97, 61)), &JxlOptions { lossless: true, ..Default::default() }, &EncodeMeta::default()).unwrap();
+    let r = decode(&b, DecodeOptions { max_pixels: 97 * 61 - 1, ..Default::default() });
+    assert!(matches!(r, Err(Error::TooLarge(97, 61))), "{r:?}");
+    let d = decode(&b, DecodeOptions { max_pixels: 97 * 61, ..Default::default() }).unwrap();
+    assert_eq!((d.width, d.height), (97, 61));
+    for cut in [0, 1, 2, 5, 12, 40, b.len() / 2, b.len() - 1] {
+        let _ = decode(&b[..cut], DecodeOptions::default());
+    }
+    assert!(decode(&b[..12.min(b.len())], DecodeOptions::default()).is_err());
+}
+
+#[test]
+#[cfg(feature = "jxl")]
+fn jxl_lossy_quality_and_effort() {
+    let img = smooth(160, 120);
+    let opaque = Rgba8 { data: img.data.iter().map(|p| [p[0], p[1], p[2], 255]).collect(), ..img.clone() };
+    let enc = |o: JxlOptions| encode_jxl(&EncodeImage::rgba8(&opaque), &o, &EncodeMeta::default()).unwrap();
+    let hi = enc(JxlOptions { quality: 95, ..Default::default() });
+    let lo = enc(JxlOptions { quality: 40, ..Default::default() });
+    assert!(lo.len() < hi.len(), "q40 {} ≥ q95 {}", lo.len(), hi.len());
+    for (q, b) in [(95, &hi), (40, &lo)] {
+        let d = decode(b, DecodeOptions::default()).unwrap();
+        let p = psnr8(&opaque, &d.to_srgb8());
+        assert!(p > if q == 95 { 38.0 } else { 28.0 }, "q{q} psnr {p}");
+    }
+    for effort in [JxlEffort::Fast, JxlEffort::Normal] {
+        for progressive in [false, true] {
+            let b = enc(JxlOptions { effort, progressive, ..Default::default() });
+            let p = psnr8(&opaque, &decode(&b, DecodeOptions::default()).unwrap().to_srgb8());
+            assert!(p > 34.0, "{effort:?} progressive={progressive} psnr {p}");
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "jxl")]
+fn jxl_lossy_wide_gamut_matches_lossless_icc() {
+    // the same display-encoded samples, lossy with the enum encoding and lossless with the ICC
+    // profile, decode to the same colours in the working space
+    let img = smooth(96, 64);
+    let opaque = Rgba8 { data: img.data.iter().map(|p| [p[0], p[1], p[2], 255]).collect(), ..img.clone() };
+    for (colour, named) in [(JxlColour::DisplayP3, NamedSpace::DisplayP3), (JxlColour::Rec2020, NamedSpace::Rec2020)] {
+        let icc = write_named(named);
+        let meta = EncodeMeta { icc: Some(&icc), ..Default::default() };
+        let e = EncodeImage::rgba8(&opaque);
+        let lossy = encode_jxl(&e, &JxlOptions { quality: 98, colour, ..Default::default() }, &meta).unwrap();
+        let exact = encode_jxl(&e, &JxlOptions { lossless: true, colour, ..Default::default() }, &meta).unwrap();
+        let a = decode(&lossy, DecodeOptions::default()).unwrap();
+        assert!(a.icc.is_none(), "lossy files carry the enum encoding");
+        let b = decode(&exact, DecodeOptions::default()).unwrap();
+        let d = max_diff(&a.to_working(), &b.to_working());
+        assert!(d < 0.03, "{colour:?}: lossy differs from lossless by {d}");
+    }
+}
+
+#[test]
+#[cfg(feature = "jxl")]
+fn jxl_alpha_and_gray() {
+    let mut img = gradient(32, 24);
+    img.data[5][3] = 0;
+    let b = encode_jxl(&EncodeImage::rgba8(&img), &JxlOptions { lossless: true, ..Default::default() }, &EncodeMeta::default()).unwrap();
+    let d = decode(&b, DecodeOptions::default()).unwrap();
+    assert!(d.has_alpha);
+    assert_eq!(d.alpha.as_ref().map(|a| a.data[5]), Some(0.0));
+    let g: Vec<u8> = (0..32 * 24).map(|i| (i % 256) as u8).collect();
+    let b = encode_jxl(&EncodeImage::new(32, 24, 1, Samples::U8(&g)), &JxlOptions { lossless: true, ..Default::default() }, &EncodeMeta::default())
+        .unwrap();
+    let d = decode(&b, DecodeOptions::default()).unwrap();
+    assert_eq!(d.to_srgb8().data.iter().map(|p| p[0]).collect::<Vec<_>>(), g);
+}
+
+#[test]
+#[cfg(feature = "jxl")]
+fn jxl_hdr_pq() {
+    // linear Rec. 2020, SDR white = 1.0: the left half at SDR white, the right half four times brighter
+    let (w, h) = (64usize, 32usize);
+    let px: Vec<f32> = (0..w * h).flat_map(|i| [if i % w < w / 2 { 1.0 } else { 4.0 }; 3]).collect();
+    for lossless in [false, true] {
+        let o = JxlOptions { lossless, quality: 95, colour: JxlColour::Rec2020Pq, ..Default::default() };
+        let b = encode_jxl(&EncodeImage::new(w as u32, h as u32, 3, Samples::F32(&px)), &o, &EncodeMeta::default()).unwrap();
+        // the file's own samples: PQ code values for 203 and 812 cd/m²
+        let img = jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(&b)).unwrap();
+        let m = &img.image_header().metadata;
+        assert_eq!(m.tone_mapping.intensity_target, 10_000.0);
+        assert!(format!("{:?}", m.colour_encoding).contains("Pq"), "{:?}", m.colour_encoding);
+        let r = img.render_frame(0).unwrap();
+        let fb = r.image_all_channels();
+        let at = |x: usize| fb.buf()[((h / 2) * w + x) * fb.channels() + 1];
+        for (x, nits) in [(w / 4, HDR_REFERENCE_WHITE_NITS), (w * 3 / 4, 4.0 * HDR_REFERENCE_WHITE_NITS)] {
+            let (got, want) = (at(x), lightcraft_codecs::encode::pq_encode(nits));
+            assert!((got - want).abs() < 0.005, "lossless={lossless}: {nits} cd/m² written as {got}, want {want}");
+        }
+    }
+    // float samples are HDR only
+    let sdr = encode_jxl(&EncodeImage::new(w as u32, h as u32, 3, Samples::F32(&px)), &JxlOptions::default(), &EncodeMeta::default());
+    assert!(matches!(sdr, Err(Error::Encode(_))));
+}
+
+#[test]
+#[cfg(feature = "jxl")]
+fn jxl_bad_input_is_an_error() {
+    let px = [0u8; 12];
+    assert!(encode_jxl(&EncodeImage::new(4, 4, 3, Samples::U8(&px)), &JxlOptions::default(), &EncodeMeta::default()).is_err());
+    assert!(encode_jxl(&EncodeImage::new(0, 4, 3, Samples::U8(&px)), &JxlOptions::default(), &EncodeMeta::default()).is_err());
+    // a 1×1 image and quality 1 still encode
+    let one = [10u8, 20, 30];
+    let b =
+        encode_jxl(&EncodeImage::new(1, 1, 3, Samples::U8(&one)), &JxlOptions { quality: 1, ..Default::default() }, &EncodeMeta::default()).unwrap();
+    assert_eq!(decode(&b, DecodeOptions::default()).unwrap().width, 1);
 }

@@ -672,7 +672,8 @@ pub fn runner(net: &Net, tile: usize) -> Result<NetRunner, String> {
         d.device.push_error_scope(wgpu::ErrorFilter::Validation),
         d.device.push_error_scope(wgpu::ErrorFilter::Internal),
     ];
-    let pipes = build_pipelines(d, &layout);
+    // the driver compiles the kernels here: a crash in it is reported at the next launch (issue #250)
+    let pipes = crate::backend::with_marker("denoise kernel compilation", || build_pipelines(d, &layout));
     let weights: Vec<(wgpu::Buffer, wgpu::Buffer)> = layers
         .iter()
         .map(|l| {
@@ -906,7 +907,7 @@ mod tests {
         match runner(net, tile) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("skipped: no GPU runner here ({e})");
+                lightcraft_testkit::skip!(Gpu, "no GPU runner here ({e})");
                 None
             }
         }

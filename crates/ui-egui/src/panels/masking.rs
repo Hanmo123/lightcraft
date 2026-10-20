@@ -13,7 +13,7 @@ use crate::theme::Tokens;
 use crate::widgets::{divider, icon_button, one_line, register, slider, text_button};
 
 mod workspace;
-pub(crate) use workspace::{command as workspace_command, floating, selected_component, selection_changed, tool_component};
+pub(crate) use workspace::{command as workspace_command, floating, select_brush, selected_component, selection_changed, tool_component};
 
 const fn spec(id: &'static str, label: &'static str, min: f64, max: f64, step: f64, decimals: u8, track: Track) -> ControlSpec {
     ControlSpec { id, label, section: Section::Light, min, max, default: 0.0, step, decimals, track }
@@ -100,6 +100,10 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 0 }).show(ui, |ui| {
             creation_status(app, ui);
         });
+        if app.ui.tool == "brush" {
+            divider(ui);
+            brush_settings(app, ui);
+        }
         return;
     }
     if app.ui.mask_panel_floating {
@@ -115,7 +119,10 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     }
     let Some(mid) = app.session.active_mask else { return };
     let Some(m) = d.masks.iter().find(|m| m.id == mid) else { return };
-    if let Some(i) = workspace::component(app, m)
+    if app.ui.tool == "brush" {
+        divider(ui);
+        brush_settings(app, ui);
+    } else if let Some(i) = workspace::component(app, m)
         && let Some(c) = m.components.get(i)
     {
         divider(ui);
@@ -133,6 +140,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         let title = ui.label(egui::RichText::new(crate::i18n::tr("Mask Adjustments")).font(t.semibold(13.0)));
         register(ui.ctx(), "label:maskAdjustments", title.rect);
     });
+    super::mask_effects::effect_row(app, ui, m);
     for s in LOCAL {
         let v = local_get(&m.adjust, s.id);
         let out = slider(ui, s, v, true, None);
@@ -196,6 +204,7 @@ fn create_tiles(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     egui::Grid::new("mask-tiles").spacing(vec2(TILE_GAP, TILE_GAP)).show(ui, |ui| {
         for (i, (kind, label, icon)) in tiles.iter().enumerate() {
             let (r, resp) = ui.allocate_exact_size(vec2(tile, 52.0), Sense::click());
+            crate::widgets::announce(&resp, crate::i18n::tr(label));
             register(ui.ctx(), format!("maskNew:{kind}"), r);
             ui.painter().rect_filled(r, 4.0, if resp.hovered() { t.hover } else { t.inset });
             paint(ui.painter(), Rect::from_center_size(r.center() - vec2(0.0, 7.0), vec2(20.0, 20.0)), *icon, t.text_label);
@@ -317,10 +326,15 @@ fn creation_status(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Translate fixed action labels, but never mutate or translate user-entered mask names.
+fn menu_label(source: &str) -> &str {
+    crate::i18n::tr(source)
+}
+
 /// The right-click menu of a mask in the Masks list.
 fn mask_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, id: u32, name: &str, visible: bool, index: usize, count: usize) {
     let mut run = |ui: &mut egui::Ui, label: &str, enabled: bool, cmd: &str, p: serde_json::Value| {
-        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        if ui.add_enabled(enabled, egui::Button::new(menu_label(label))).clicked() {
             let _ = app.run(cmd, p);
             ui.close();
         }
@@ -358,12 +372,12 @@ fn overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let view = MaskView::parse(&app.ui.mask_overlay_mode).unwrap_or_default();
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(crate::i18n::tr("Overlay")).color(t.text_dim));
-        let r = crate::widgets::dropdown(ui, "maskOverlayMode", view.label(), t.font(12.5), t.text_label);
+        let r = crate::widgets::dropdown(ui, "maskOverlayMode", menu_label(view.label()), t.font(12.5), t.text_label);
         // A second memory-backed Popup replaces the settings popup. Submenus keep its
         // lifetime and outside-click handling connected to their parent instead.
         egui::containers::menu::SubMenu::new().show(ui, &r, |ui| {
             for v in MaskView::ALL {
-                let option = ui.selectable_label(v == view, v.label());
+                let option = ui.selectable_label(v == view, menu_label(v.label()));
                 register(ui.ctx(), format!("maskOverlayMode:{}", v.name()), option.rect);
                 if option.clicked() {
                     let _ = app.run("view.maskOverlayMode", json!({"mode": v.name()}));
@@ -376,6 +390,7 @@ fn overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             for c in OVERLAY_COLORS {
                 let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                crate::widgets::announce(&resp, format!("{} #{:02x}{:02x}{:02x}", crate::i18n::tr("Overlay color"), c[0], c[1], c[2]));
                 register(ui.ctx(), format!("maskOverlayColor:{:02x}{:02x}{:02x}", c[0], c[1], c[2]), r);
                 ui.painter().rect_filled(r.shrink(2.0), 3.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
                 if app.ui.mask_overlay_color == c {
@@ -423,6 +438,9 @@ fn overlay_options(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     if ui.checkbox(&mut pins, crate::i18n::tr("Show Pins")).changed() {
         let _ = app.run("view.maskPins", json!({"show": pins}));
     }
+    if app.ui.mask_pins {
+        super::right::tool_overlay_options(app, ui);
+    }
 }
 
 /// Controls for a range component: the selected range (two handles over a dark → light bar),
@@ -438,6 +456,7 @@ fn range_controls(app: &mut LightcraftApp, ui: &mut egui::Ui, comp: usize, shape
             let (lo, hi) = (*lo, *hi);
             let w = ui.available_width().min(240.0);
             let (rect, resp) = ui.allocate_exact_size(vec2(w, 18.0), Sense::click_and_drag());
+            crate::widgets::announce(&resp, crate::i18n::tr("Select Luminance Range"));
             register(ui.ctx(), format!("lumRange:{comp}"), rect);
             let p = ui.painter();
             // dark → light ramp, the selected span outlined
@@ -462,18 +481,27 @@ fn range_controls(app: &mut LightcraftApp, ui: &mut egui::Ui, comp: usize, shape
                 p.circle_filled(pos2(x(v), rect.center().y), 5.0, egui::Color32::WHITE);
                 p.circle_stroke(pos2(x(v), rect.center().y), 5.0, Stroke::new(1.0, egui::Color32::from_gray(40)));
             }
-            // drag the nearer handle; one undo step per drag
+            // Choose at the press position, then keep that handle for the entire drag. Testing
+            // proximity on every frame can move the opposite endpoint after a fast/crossing drag.
+            let handle_id = resp.id.with("luminance-handle");
+            let nearer_low = |px: f32| (px - x(lo)).abs() <= (px - x(hi)).abs();
             if resp.drag_started() {
+                if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+                    ui.data_mut(|d| d.insert_temp(handle_id, nearer_low(origin.x)));
+                }
                 let _ = app.run("develop.beginInteraction", json!({"label": "Luminance Range"}));
             }
             if (resp.dragged() || resp.clicked())
                 && let Some(pos) = resp.interact_pointer_pos()
             {
                 let v = (((pos.x - rect.left()) / w) as f64).clamp(0.0, 1.0);
-                let (nlo, nhi) = if (v - lo).abs() <= (v - hi).abs() { (v.min(hi - 0.01), hi) } else { (lo, v.max(lo + 0.01)) };
+                let low =
+                    if resp.dragged() { ui.data(|d| d.get_temp::<bool>(handle_id)).unwrap_or_else(|| nearer_low(pos.x)) } else { nearer_low(pos.x) };
+                let (nlo, nhi) = if low { (v.min((hi - 0.01).max(0.0)), hi) } else { (lo, v.max((lo + 0.01).min(1.0))) };
                 update(app, MaskShape::LuminanceRange { lo: nlo, hi: nhi, lo_feather: *lo_feather, hi_feather: *hi_feather });
             }
             if resp.drag_stopped() {
+                ui.data_mut(|d| d.remove::<bool>(handle_id));
                 let _ = app.run("develop.endInteraction", json!({}));
             }
             // Smoothness: both falloffs at once
@@ -573,7 +601,7 @@ fn range_controls(app: &mut LightcraftApp, ui: &mut egui::Ui, comp: usize, shape
 /// The right-click / "…" menu of one component of the selected mask.
 fn component_row_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, mask: u32, k: usize, label: &str, count: usize) {
     let mut run = |ui: &mut egui::Ui, text: &str, p: serde_json::Value| {
-        if ui.button(crate::i18n::tr(text)).clicked() {
+        if ui.button(menu_label(text)).clicked() {
             let mut p = p;
             p["id"] = json!(mask);
             p["component"] = json!(k);
@@ -584,19 +612,19 @@ fn component_row_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, mask: u32, k: 
     run(ui, "Invert", json!({"action": "invert"}));
     run(ui, &crate::i18n::tr_format!("Duplicate \"{label}\"", label = label), json!({"action": "duplicate"}));
     if k > 0 {
-        ui.menu_button(crate::i18n::tr("Mode"), |ui| {
+        crate::widgets::menu_button(ui, crate::i18n::tr("Mode"), |ui| {
             for (op, text) in [("add", "Add"), ("subtract", "Subtract"), ("intersect", "Intersect")] {
                 run(ui, text, json!({"action": "op", "op": op}));
             }
         });
     }
     for (op, label) in [("intersect", "Intersect with"), ("subtract", "Subtract")] {
-        let menu = ui.menu_button(crate::i18n::tr(label), |ui| component_menu(app, ui, mask, op));
+        let menu = crate::widgets::menu_button(ui, menu_label(label), |ui| component_menu(app, ui, mask, op));
         register(ui.ctx(), format!("maskComponentMenu:{k}:{op}"), menu.response.rect);
     }
     ui.separator();
     for (key, label, delta, enabled) in [("up", "Move Up", -1, k > 0), ("down", "Move Down", 1, k.saturating_add(1) < count)] {
-        let button = ui.add_enabled(enabled, egui::Button::new(crate::i18n::tr(label)));
+        let button = ui.add_enabled(enabled, egui::Button::new(menu_label(label)));
         register(ui.ctx(), format!("maskComponentMove:{k}:{key}"), button.rect);
         if button.clicked() {
             if let Err(e) = app.run("mask.component", json!({"id": mask, "component": k, "action": "move", "delta": delta})) {
@@ -638,8 +666,11 @@ pub(crate) fn start_object(app: &mut LightcraftApp, ctx: &egui::Context, op: &st
     if needs_model(app, "object", op) {
         return;
     }
-    let r =
-        if op == "new" { app.run("mask.add", json!({"kind": "object"})) } else { app.run("mask.addComponent", json!({"op": op, "kind": "object"})) };
+    let r = if op == "new" {
+        app.run_typed("mask.add", json!({"kind": "object"}))
+    } else {
+        app.run_typed("mask.addComponent", json!({"op": op, "kind": "object"}))
+    };
     match r {
         Ok(_) => {
             app.ui.tool = "object".into();
@@ -717,9 +748,9 @@ fn describe_field(app: &mut LightcraftApp, ui: &mut egui::Ui, new_mask: bool) {
     app.ui.describe = Some((op.clone(), text.clone()));
     if submit && !text.trim().is_empty() {
         let r = if op == "new" {
-            app.run("mask.add", json!({"kind": "prompt", "text": text}))
+            app.run_typed("mask.add", json!({"kind": "prompt", "text": text}))
         } else {
-            app.run("mask.addComponent", json!({"op": op, "kind": "prompt", "text": text}))
+            app.run_typed("mask.addComponent", json!({"op": op, "kind": "prompt", "text": text}))
         };
         match r {
             // the mask appears when the model has found it (a detail pass follows)
@@ -736,7 +767,7 @@ fn component_menu(app: &mut LightcraftApp, ui: &mut egui::Ui, mask: u32, op: &st
             ui.separator();
         }
         let label = if kind == "prompt" { "Describe…" } else { label };
-        let b = ui.add(egui::Button::new(crate::i18n::tr(label)).min_size(vec2(0.0, 26.0)));
+        let b = ui.add(egui::Button::new(menu_label(label)).min_size(vec2(0.0, 26.0)));
         register(ui.ctx(), format!("maskComp:{op}:{kind}"), b.rect);
         if b.clicked() {
             // A parent menu can belong to an unselected mask. Select its target only
@@ -802,12 +833,39 @@ fn brush_settings(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         if response.changed() {
             let _ = app.run("mask.brushSettings", json!({"autoMask": auto}));
         }
+        let mut pressure = app.ui.brush_pressure;
+        if ui
+            .checkbox(&mut pressure, crate::i18n::tr("Pen Pressure"))
+            .on_hover_text(crate::i18n::tr("A pen's pressure sets the size and flow of the brush"))
+            .changed()
+        {
+            let _ = app.run("mask.brushSettings", json!({"pressure": pressure}));
+        }
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn masking_context_actions_use_catalog_translations() {
+        let saved = crate::i18n::language();
+        crate::i18n::set_language(crate::i18n::Locale::Fr);
+        for (english, translated) in [
+            ("Duplicate Mask", "Dupliquer le masque"),
+            ("Invert Mask", "Inverser le masque"),
+            ("Hide Mask", "Masquer le masque"),
+            ("Move Up", "Monter"),
+            ("Brush", "Pinceau"),
+            ("Luminance Range", "Plage de luminance"),
+        ] {
+            assert_eq!(menu_label(english), translated, "{english}");
+        }
+        // An arbitrary user name has no catalog entry and is left unchanged.
+        assert_eq!(menu_label("My custom mask"), "My custom mask");
+        crate::i18n::set_language(saved);
+    }
 
     /// The grid keeps four 52 pt tiles when the labels fit, and gives a long (translated) label
     /// room by dropping a column rather than drawing it past its tile.

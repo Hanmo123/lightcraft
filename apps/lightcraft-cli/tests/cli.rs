@@ -47,6 +47,48 @@ fn contact_sheet_exports_pdf_and_protects_originals() {
     assert_eq!(std::fs::read(&out).unwrap(), prior, "failed export changed prior output");
 }
 
+#[test]
+fn print_commands_chain_into_a_picture_package_pdf() {
+    let input = tmp("print-input.png");
+    gradient_png(&input);
+    let out = tmp("print.pdf");
+    let (ok, lines, err) = run_cli(
+        &[
+            "--import",
+            input.to_str().unwrap(),
+            "print.set",
+            r#"layout={"style":"picturePackage","page":{"paper":"4x6","orientation":"landscape"}}"#,
+            r#"image={"zoomToFill":true,"borderEnabled":true,"borderWidth":0.05}"#,
+            "job={\"ppi\":72}",
+            "print.cell.add",
+            "width=1.5",
+            "height=1",
+            "print.cell.add",
+            "width=1.5",
+            "height=1",
+            "print.layout.autoLayout",
+            "print.exportPdf",
+            &format!("path={}", out.display()),
+        ],
+        None,
+    );
+    assert!(ok, "{err}: {lines:?}");
+    let export = lines.last().unwrap();
+    assert_eq!((export["result"]["pages"].as_u64(), export["result"]["photos"].as_u64()), (Some(1), Some(1)));
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"%PDF-"));
+    let text = String::from_utf8_lossy(&bytes);
+    let at = text.find("/MediaBox [").unwrap() + "/MediaBox [".len();
+    let nums: Vec<f64> = text[at..].split(']').next().unwrap().split_whitespace().map(|v| v.parse().unwrap()).collect();
+    assert_eq!((nums[2], nums[3]), (432.0, 288.0), "6 x 4 in");
+    // a bad setting fails the run and writes nothing new
+    let before = std::fs::read(&out).unwrap();
+    let (ok, _, _) =
+        run_cli(&["--import", input.to_str().unwrap(), "print.set", "job={\"ppi\":5}", "print.exportPdf", &format!("path={}", out.display())], None);
+    assert!(!ok);
+    assert_eq!(std::fs::read(&out).unwrap(), before);
+}
+
 fn tmp(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("lightcraft-cli-test-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
@@ -137,6 +179,51 @@ fn render_subcommand() {
     let o = Command::new(BIN).args(["render", input.to_str().unwrap(), "-o", out.to_str().unwrap(), "--set", "nope=1"]).output().unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("unknown control"));
+}
+
+/// Issue #1730: `render --settings` took a `.lcpreset` from `preset.export`, ignored its wrapper
+/// and rendered the photo unedited.
+#[test]
+fn render_settings_applies_an_lcpreset_and_refuses_unknown_files() {
+    let input = tmp("lcpreset-in.png");
+    gradient_png(&input);
+    let preset = tmp("bright.lcpreset");
+    let (ok, lines, err) = run_cli(
+        &[
+            "--import",
+            input.to_str().unwrap(),
+            "develop.set",
+            "control=light.exposure",
+            "value=1",
+            "preset.create",
+            "name=Bright",
+            "preset.export",
+            &format!("path={}", preset.display()),
+        ],
+        None,
+    );
+    assert!(ok, "{err}: {lines:?}");
+    let plain = tmp("lcpreset-plain.png");
+    let st = Command::new(BIN).args(["render", input.to_str().unwrap(), "-o", plain.to_str().unwrap()]).status().unwrap();
+    assert!(st.success());
+    let bright = tmp("lcpreset-bright.png");
+    let o = Command::new(BIN)
+        .args(["render", input.to_str().unwrap(), "-o", bright.to_str().unwrap(), "--settings", preset.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(mean(&bright) > mean(&plain) + 10.0, "the preset's exposure was not applied");
+
+    let other = tmp("other.lcpreset");
+    std::fs::write(&other, r#"{"format": "other", "version": 1, "presets": []}"#).unwrap();
+    let out = tmp("lcpreset-other.png");
+    let o = Command::new(BIN)
+        .args(["render", input.to_str().unwrap(), "-o", out.to_str().unwrap(), "--settings", other.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!o.status.success(), "an unreadable settings file was accepted");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("other.lcpreset"), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(!out.exists(), "nothing is written when the settings can't be read");
 }
 
 /// Issue #93: `render IMG -o IMG` replaced its own input with the render.
@@ -271,6 +358,24 @@ fn snapshot_script_failure_exits_non_zero() {
     // continue-and-report: the final screenshot is still written
     let d = lightcraft_codecs::decode(&std::fs::read(&out).unwrap(), Default::default()).unwrap();
     assert_eq!((d.width, d.height), (320, 200));
+}
+
+/// A script line whose `params` is not an object must be an error, never a panic: the
+/// `ui.screenshot`-without-a-path branch used to index (`params["path"] = …`) an array and abort
+/// the whole script.
+#[test]
+fn snapshot_script_with_non_object_params_is_an_error() {
+    let script = tmp("snap-bad-params.jsonl");
+    let out = tmp("snap-bad-params.png");
+    std::fs::write(&script, format!("{}\n", json!({"method": "ui.screenshot", "params": [1]}))).unwrap();
+    let o = Command::new(BIN)
+        .args(["snapshot", "--demo", "--script", script.to_str().unwrap(), "-o", out.to_str().unwrap(), "--size", "320x200"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{stderr}");
+    assert!(!stderr.contains("panicked"), "a bad `params` must be an error, not a panic: {stderr}");
+    assert!(stderr.contains("`params` must be a JSON object"), "{stderr}");
 }
 
 #[test]
@@ -476,6 +581,28 @@ fn connect_failure_hint_names_the_attempted_port() {
     assert!(!err.contains("--control 7980"), "{err}");
 }
 
+/// Issue #1178: `--connect 7980 ui.inspect` (after `lightcraft --control 7980`) was leaving
+/// `7980` unconsumed so it parsed as a command id and produced "unknown command `7980`".
+/// A bare port is now taken as `127.0.0.1:<port>`; the same address used with `:port` still
+/// works; non-numeric, non-`ADDR`-shaped tokens (e.g. a real command id) keep falling through.
+#[test]
+fn connect_bare_port_is_treated_as_loopback_port() {
+    // Bare port: the failure hint names that port.
+    let (ok, _lines, err) = run_cli(&["--connect", "18437", "ui.inspect"], None);
+    assert!(!ok);
+    assert!(err.contains("--control 18437"), "bare port must reach the hint: {err}");
+    assert!(!err.contains("--control 7980"), "{err}");
+    // `<host>:<port>` still works (issue #167 case).
+    let (ok, _lines, err) = run_cli(&["--connect", "127.0.0.1:18437", "ui.inspect"], None);
+    assert!(!ok);
+    assert!(err.contains("--control 18437"), "{err}");
+    // `--connect=<bare-port>` already worked (the `a.starts_with("--connect=")` arm); spot-check
+    // the hint matches its port too.
+    let (ok, _lines, err) = run_cli(&["--connect=18437", "ui.inspect"], None);
+    assert!(!ok);
+    assert!(err.contains("--control 18437"), "{err}");
+}
+
 /// The CLI logs warnings on stderr (#168): with `RUST_LOG=warn` an unknown GPU backend name is
 /// reported, and `RUST_LOG=off` silences it. Before, no logger was installed and nothing appeared.
 #[test]
@@ -576,4 +703,70 @@ fn snapshot_leaves_desktop_gpu_preferences_untouched() {
         assert!(!app_config.join("ui.json.tmp").exists());
         assert!(image.exists());
     }
+}
+
+/// `denoise-serve` serves the selected installed model; a client greets it and gets the CPU's answer for a tile
+/// (within half-float rounding on the wire), and a wrong token or a missing token variable is refused.
+#[cfg(feature = "denoise")]
+#[test]
+fn denoise_serve_runs_tiles_for_another_computer() {
+    use lightcraft_denoise::manifest::{DenoiserManifest, Domain, Gain};
+    use lightcraft_denoise::remote::Remote;
+    use lightcraft_denoise::run::TileRunner;
+    let models = tmp("denoise-models");
+    let _ = std::fs::remove_dir_all(&models);
+    let dir = models.join("synthetic");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = DenoiserManifest {
+        id: "synthetic".into(),
+        name: "Synthetic".into(),
+        version: "1".into(),
+        licence: Default::default(),
+        source: None,
+        sha256: None,
+        size_bytes: None,
+        provenance: "made for a test".into(),
+        domain: Domain::BayerToRgb,
+        tile: 64,
+        overlap: 16,
+        gain: Gain::None,
+    };
+    let onnx = dir.join("model.onnx");
+    std::fs::write(&onnx, lightcraft_denoise::synthetic::unet_onnx(64, 8, 2, 7)).unwrap();
+    std::fs::write(dir.join("denoise-model.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    std::fs::write(models.join("settings.json"), r#"{"model": "synthetic"}"#).unwrap();
+    let sha = lightcraft_denoise::hash::sha256_file(&onnx).unwrap();
+
+    // without its token the server doesn't start
+    let o = Command::new(BIN).args(["denoise-serve", "--models", models.to_str().unwrap(), "--token-env", "LC_TEST_NO_SUCH_VAR"]).output().unwrap();
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("LC_TEST_NO_SUCH_VAR"));
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let addr = format!("127.0.0.1:{port}");
+    let token = "cli-test-token-0123456789";
+    let mut child = Command::new(BIN)
+        .args(["denoise-serve", "--models", models.to_str().unwrap(), "--listen", &addr, "--run-on", "cpu"])
+        .env("LIGHTCRAFT_DENOISE_TOKEN", token)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // wait for the banner
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut banner = String::new();
+    err.read_line(&mut banner).unwrap();
+    assert!(banner.contains("synthetic 1") && banner.contains(&addr), "{banner}");
+
+    let remote = Remote::new(&addr, token, &sha, 64);
+    let info = remote.hello().unwrap();
+    assert!(info.device.starts_with("CPU"), "{info:?}");
+    let (input, _) = lightcraft_denoise::runtime::test_tile(64);
+    let got = remote.try_run(&input).unwrap().unwrap();
+    let want = lightcraft_denoise::runtime::CpuRunner::load(&onnx, &manifest).unwrap().run(&input).unwrap();
+    let scale = want.iter().fold(1e-9f32, |m, v| m.max(v.abs()));
+    let worst = want.iter().zip(&got).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+    assert!(worst < 5e-3, "remote vs local: {worst}");
+    assert!(Remote::new(&addr, "a-wrong-token-000000", &sha, 64).hello().is_err());
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&models);
 }

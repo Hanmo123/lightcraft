@@ -31,6 +31,17 @@ fn angle(h: &Headless) -> f64 {
     h.app.session.catalog.photo(id).expect("the photo").develop.crop.geometry.angle
 }
 
+/// The crop box lies inside the rotated photo (issue #742: a typed or slid angle shrinks it to fit,
+/// as the rotate handle does).
+fn crop_fits(h: &Headless) -> bool {
+    let id = h.app.session.active().expect("a photo");
+    let p = h.app.session.catalog.photo(id).expect("the photo");
+    let (w, h) = (p.width as f64, p.height as f64);
+    let (w, h) = if p.develop.orientation.swaps_axes() { (h, w) } else { (w, h) };
+    let g = p.develop.crop.geometry;
+    g.rect != lightcraft_geom::Rect::UNIT && g.is_within_image(w, h)
+}
+
 fn hover(h: &mut Headless, p: egui::Pos2) {
     let r = h.request("ui.move", json!({"x": p.x, "y": p.y}), T);
     assert_eq!(r["ok"], true, "{r}");
@@ -88,6 +99,7 @@ fn the_straighten_value_takes_an_exact_angle() {
     assert_eq!(r["ok"], true, "{r}");
     h.settle(SETTLE);
     assert!((angle(&h) - 2.5).abs() < 1e-9, "typed 2.5°, got {}", angle(&h));
+    assert!(crop_fits(&h), "the Straighten value shrinks the crop to fit the photo");
 }
 
 /// The angle next to the pointer reads like the Straighten value, in degrees.
@@ -109,7 +121,7 @@ fn the_straighten_value_says_it_can_be_typed() {
     // tooltips wait for the pointer to rest
     let _ = h.step_until(Duration::from_secs(5), |h| h.painted_text().iter().any(|t| t.contains("type")));
     assert!(
-        h.painted_text().iter().any(|t| t == "Click to type a value"),
+        h.painted_text().iter().any(|t| t == "Click to type a value, drag to change it"),
         "{:?}",
         h.painted_text().iter().filter(|t| t.contains("lick")).collect::<Vec<_>>()
     );
@@ -145,6 +157,7 @@ fn the_crop_panel_has_an_angle_field() {
     assert_eq!(r["ok"], true, "{r}");
     h.settle(SETTLE);
     assert!((angle(&h) + 3.25).abs() < 1e-9, "typed -3.25°, got {}", angle(&h));
+    assert!(crop_fits(&h), "the Angle field shrinks the crop to fit the photo");
 }
 
 /// Rotating with the pointer at the canvas's corner keeps the angle readout on the canvas (and so
@@ -363,4 +376,81 @@ fn the_angle_field_writes_the_angle_like_the_readout() {
     // the field's number follows its label (its "°" is painted on its own)
     let field = texts.iter().position(|t| t == "Angle").and_then(|i| texts.get(i + 1));
     assert_eq!(field.map(String::as_str), Some("+2.50"), "{texts:?}");
+}
+
+/// Issue #731: the dimming outside a rotated crop box stays outside it. The photo is shown
+/// unrotated under the box, so a pixel inside the box at -45° looks exactly as it does at 0°,
+/// where the box is the whole photo and nothing is dimmed; the photo's corner, outside the
+/// box, is darker. (The dimming was four quads joining photo and box corners, which crossed the
+/// box once rotated: dimmed wedges inside it, doubly dark ones outside, growing with the angle.)
+#[test]
+fn rotating_the_crop_dims_nothing_inside_the_box() {
+    let mut h = crop_tool();
+    let plain = h.paint();
+    let r = h.request("engine.execute", json!({"command": "develop.set", "params": {"control": "crop.angle", "value": -45.0}}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    assert_eq!(angle(&h), -45.0);
+    let rotated = h.paint();
+    let img = h.app.image_rect.expect("the photo on screen");
+    let corner = |i: usize| h.app.widgets.iter().find(|(w, _)| *w == format!("cropHandle:{i}")).map(|(_, r)| r.center()).expect("a corner handle");
+    let c = [corner(0), corner(1), corner(2), corner(3)];
+    let at = |u: f32, v: f32| c[0] + (c[1] - c[0]) * u + (c[3] - c[0]) * v;
+    let pixel = |im: &egui::ColorImage, p: egui::Pos2| im.pixels[p.y.round() as usize * im.size[0] + p.x.round() as usize];
+    let mut checked = 0;
+    for u in [0.15, 0.25, 0.5, 0.75, 0.85] {
+        for v in [0.15, 0.25, 0.5, 0.75, 0.85] {
+            let p = at(u, v);
+            // clear of the 0° guide lines (thirds of the photo) and of the photo's edge
+            let thirds = |t: f32, lo: f32, len: f32| [1.0 / 3.0, 2.0 / 3.0].iter().any(|f| (t - (lo + f * len)).abs() < 3.0);
+            if !img.shrink(4.0).contains(p) || thirds(p.x, img.left(), img.width()) || thirds(p.y, img.top(), img.height()) {
+                continue;
+            }
+            assert_eq!(pixel(&rotated, p), pixel(&plain, p), "inside the box at ({u}, {v}) = {p:?}");
+            checked += 1;
+        }
+    }
+    assert!(checked >= 12, "{checked} points inside the box compared");
+    let corner_px = img.left_top() + egui::vec2(6.0, 6.0);
+    let lum = |c: egui::Color32| u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b());
+    assert!(lum(pixel(&rotated, corner_px)) < lum(pixel(&plain, corner_px)), "the photo's corner, outside the box, is dimmed");
+}
+
+fn crop_rect(h: &Headless) -> lightcraft_geom::Rect {
+    let id = h.app.session.active().expect("a photo");
+    h.app.session.catalog.photo(id).expect("the photo").develop.crop.geometry.rect
+}
+
+/// Press where the pointer shows the resize cursor for the left edge handle, `dx` px from the
+/// edge, and drag on by `step` px per event: the drag must resize, as the cursor said (issue #1930).
+fn drag_left_handle(dx: f32, step: f32) -> Headless {
+    let mut h = crop_tool();
+    let img = h.app.image_rect.expect("the photo on screen");
+    hover(&mut h, egui::pos2(img.left() + dx, img.center().y));
+    assert_eq!(h.last_cursor, egui::CursorIcon::ResizeHorizontal, "the pointer shows a resize");
+    let x = |px: f32| px / img.width();
+    let events: Vec<_> = std::iter::once(json!({"kind": "down", "x": x(dx), "y": 0.5}))
+        .chain((1..=4).map(|i| json!({"kind": "drag", "x": x(dx + step * i as f32), "y": 0.5})))
+        .collect();
+    let r = h.request("ui.pointer", json!({ "events": events }), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    h
+}
+
+/// Just outside the box, inside the handle's reach: the drag resizes, it does not rotate.
+#[test]
+fn a_drag_from_just_outside_a_handle_resizes_not_rotates() {
+    let h = drag_left_handle(-8.0, -3.0);
+    assert_eq!(angle(&h), 0.0, "the resize cursor showed, so nothing rotates");
+    assert!(!has(&h, "cropAngleReadout"), "no rotation under way");
+}
+
+/// Just inside the box, inside the handle's reach: the drag moves the left edge, not the box.
+#[test]
+fn a_drag_from_just_inside_a_handle_resizes_not_moves() {
+    let h = drag_left_handle(8.0, 3.0);
+    let r = crop_rect(&h);
+    assert!(r.x0 > 0.0, "the left edge moved in: {r:?}");
+    assert!((r.x1 - 1.0).abs() < 1e-6, "the right edge stays: {r:?}");
 }

@@ -458,6 +458,15 @@ fn mask_adjustments_hide_overlay_without_disabling_the_mask() {
     assert_eq!(develop(&h).masks[0], mask, "toggling the overlay leaves the mask and its effect unchanged");
     assert!(matches!(crate::panels::detail::view_overlay(&h.app, &develop(&h)), Overlay::Mask { .. }));
 
+    // Ctrl+Shift+O / Cmd+Shift+O shows every visible mask's region at once (the new command), ahead of the selected
+    // mask overlay so it is not shadowed by the always-on single-mask overlay.
+    exec(&mut h, "view.maskOverlayAll", json!({}));
+    assert!(h.app.ui.mask_overlay_all, "the all-masks overlay command turns it on");
+    assert!(matches!(crate::panels::detail::view_overlay(&h.app, &develop(&h)), Overlay::AllMasks { .. }));
+    exec(&mut h, "view.maskOverlayAll", json!({}));
+    assert!(!h.app.ui.mask_overlay_all, "the all-masks overlay command toggles it off");
+    assert!(!matches!(crate::panels::detail::view_overlay(&h.app, &develop(&h)), Overlay::AllMasks { .. }));
+
     // Failed edits and global adjustments must not hide the mask overlay.
     assert!(h.app.run("mask.adjust", json!({"id": 999, "values": {"exposure": 1.0}})).is_err());
     assert!(h.app.ui.mask_overlay);
@@ -624,6 +633,32 @@ fn holding_the_brush_still_does_not_harden_the_spot() {
     h.settle(SETTLE);
 }
 
+/// A ⇧-click with the brush paints a straight line from where the last stroke ended (issue #106 of the Classic
+/// fork), one undo step; a plain click only paints a dab where it lands.
+#[test]
+fn shift_click_paints_a_straight_line_from_the_last_stroke() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "tool.brush", json!({}));
+    brush_at(&mut h, 0.2, 0.5);
+    brush_at(&mut h, 0.8, 0.5);
+    assert!(mask_coverage(&h, 0, 50, 50) < 0.01, "two plain clicks leave the space between them alone");
+    let r = h.request("ui.pointer", json!({"events": [{"kind": "down", "x": 0.5, "y": 0.2}, {"kind": "up", "x": 0.5, "y": 0.2}], "shift": true}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let d = develop(&h);
+    let MaskShape::Brush { strokes } = &d.masks[0].components[0].shape else { panic!("brush") };
+    assert_eq!(strokes.len(), 3, "{strokes:?}");
+    assert_eq!(strokes[2].points.len(), 2, "from the last stroke's end to the click: {strokes:?}");
+    for (x, y) in [(65, 35), (58, 27)] {
+        assert!(mask_coverage(&h, 0, x, y) > 0.5, "the line from (0.8, 0.5) to (0.5, 0.2) passes ({x}, {y})");
+    }
+    assert!(mask_coverage(&h, 0, 35, 35) < 0.01, "and nowhere else");
+    exec(&mut h, "edit.undo", json!({}));
+    let d = develop(&h);
+    let MaskShape::Brush { strokes } = &d.masks[0].components[0].shape else { panic!("brush") };
+    assert_eq!(strokes.len(), 2, "one undo step takes the line back");
+    h.settle(SETTLE);
+}
+
 #[test]
 fn brush_strokes_carry_auto_mask() {
     let mut h = detail("panel.masking");
@@ -766,6 +801,54 @@ fn command_drag_straightens_in_crop() {
     assert_eq!(h.app.ui.tool, tool, "the crop tool stays active");
     assert!(h.app.gesture.is_none());
     h.settle(SETTLE);
+}
+
+#[test]
+fn crop_drag_activates_the_remembered_ratio_and_undo_restores_the_photo() {
+    let mut h = detail("panel.crop");
+    h.app.ui.crop_default_aspect = Some(json!([1, 1]));
+    h.settle(SETTLE);
+    let before = develop(&h);
+    let undo = h.app.session.undo.len();
+    assert!(before.crop.aspect.is_none());
+    let r = h.request(
+        "ui.pointer",
+        json!({"events": [
+            {"kind": "down", "x": 0.995, "y": 0.995},
+            {"kind": "drag", "x": 0.85, "y": 0.85},
+            {"kind": "drag", "x": 0.75, "y": 0.75},
+            {"kind": "up", "x": 0.75, "y": 0.75}
+        ]}),
+        T,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    assert_eq!(develop(&h).crop.aspect, Some((100, 100)));
+    assert_eq!(h.app.session.undo.len(), undo + 1);
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(develop(&h), before);
+}
+
+/// A remembered ratio the crop command refuses (a hand-edited settings file) is forgotten, and the
+/// drag still crops: it must not block every crop of an untouched photo.
+#[test]
+fn a_bad_remembered_ratio_is_dropped_and_the_drag_still_crops() {
+    let mut h = detail("panel.crop");
+    h.app.ui.crop_default_aspect = Some(json!([0, -3]));
+    h.settle(SETTLE);
+    let before = develop(&h);
+    // a rotating drag outside the box (any crop drag starts cropping); the release on its own
+    for events in [
+        json!([{"kind": "down", "x": -0.05, "y": 0.2}, {"kind": "drag", "x": -0.05, "y": 0.25}, {"kind": "drag", "x": -0.05, "y": 0.3}]),
+        json!([{"kind": "up", "x": -0.05, "y": 0.3}]),
+    ] {
+        let r = h.request("ui.pointer", json!({ "events": events }), T);
+        assert_eq!(r["ok"], true, "{r}");
+        h.settle(SETTLE);
+    }
+    assert_eq!(h.app.ui.crop_default_aspect, None, "the bad value is forgotten");
+    assert_ne!(develop(&h).crop, before.crop, "the drag cropped");
+    assert_eq!(develop(&h).crop.aspect, None);
 }
 
 #[test]
@@ -1066,6 +1149,31 @@ fn g_toggles_grids_and_shift_g_starts_guided_upright() {
 }
 
 #[test]
+fn luminance_range_drag_keeps_the_grabbed_handle() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "luminanceRange", "lo": 0.2, "hi": 0.8}));
+    h.settle(SETTLE);
+    let original = develop(&h);
+    for (start, dx, steps) in [(0.2, 180.0, 10), (0.8, -180.0, 10), (0.2, 120.0, 1), (0.8, -120.0, 1)] {
+        let undo0 = h.app.session.undo.len();
+        let r = h.request("ui.dragWidget", json!({"id": "lumRange:0", "fx": start, "fy": 0.5, "dx": dx, "steps": steps}), T);
+        assert_eq!(r["ok"], true, "{r}");
+        let d = develop(&h);
+        let MaskShape::LuminanceRange { lo, hi, .. } = &d.masks[0].components[0].shape else { panic!() };
+        if start < 0.5 {
+            assert_eq!(*hi, 0.8, "dragging low must leave high fixed, including past high");
+            assert!(*lo > 0.6 && *lo < *hi, "{lo}..{hi}");
+        } else {
+            assert_eq!(*lo, 0.2, "dragging high must leave low fixed, including past low");
+            assert!(*hi < 0.4 && *hi > *lo, "{lo}..{hi}");
+        }
+        assert_eq!(h.app.session.undo.len(), undo0 + 1);
+        exec(&mut h, "edit.undo", json!({}));
+        assert_eq!(develop(&h), original);
+    }
+}
+
+#[test]
 fn luminance_range_controls_and_map() {
     let mut h = detail("panel.masking");
     exec(&mut h, "mask.add", json!({"kind": "luminanceRange", "lo": 0.6, "hi": 1.0}));
@@ -1138,35 +1246,45 @@ fn local_folder_tree_expands_and_browses() {
     h.settle(SETTLE);
 }
 
+/// A folder listed twice in Local (Pictures as a place of its own and again inside Home) opens
+/// and closes on each row by itself: both copies of its triangle used to share one egui id, so
+/// the copy drawn later took the clicks of the one drawn first (issue #1093).
 #[test]
-fn slideshow_advances_pauses_and_ends() {
+fn local_folder_listed_twice_opens_and_closes_each_row() {
+    let base = std::env::temp_dir().join(format!("lc-ui-twice-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let inner = base.join("Inner");
+    std::fs::create_dir_all(inner.join("Sub")).unwrap();
     let mut h = detail("panel.edit");
-    let first = h.app.session.active();
-    exec(&mut h, "view.slideshow", json!({"interval": 0.5}));
-    assert!(h.app.ui.fullscreen && h.app.ui.slideshow.is_some());
-    // simulated time runs with the frames
-    let mut moved = false;
-    for _ in 0..200 {
-        h.step();
-        if h.app.session.active() != first {
-            moved = true;
-            break;
-        }
-    }
-    assert!(moved, "the next photo comes up");
-    // Space pauses: nothing moves
-    let r = h.request("ui.key", json!({"key": "space"}), T);
+    exec(&mut h, "view.leftPanel", json!({"show": true}));
+    h.hide_home_above(&base);
+    let (base_s, inner_s) = (base.to_string_lossy().to_string(), inner.to_string_lossy().to_string());
+    let sub = inner.join("Sub").to_string_lossy().to_string();
+    exec(&mut h, "local.addRoot", json!({"path": base_s}));
+    exec(&mut h, "local.addRoot", json!({"path": inner_s}));
+    h.settle(SETTLE);
+    let r = h.request("ui.clickWidget", json!({"id": format!("folderToggle:{base_s}")}), T);
     assert_eq!(r["ok"], true, "{r}");
-    assert!(h.app.ui.slideshow.is_some_and(|s| s.2), "paused");
-    let held = h.app.session.active();
-    for _ in 0..120 {
-        h.step();
+    let toggle = format!("folderToggle:{inner_s}");
+    h.step_until(SETTLE, |h| h.app.widgets.iter().filter(|(w, _)| *w == toggle).count() == 2);
+    let rows = |h: &Headless, id: &str| h.app.widgets.iter().filter(|(w, _)| w == id).count();
+    assert_eq!(rows(&h, &toggle), 2, "Inner is listed inside the base folder and as a place of its own");
+    let sub_row = format!("source:local:{sub}");
+    assert_eq!(rows(&h, &sub_row), 0);
+    // each copy's triangle opens that copy only, and closes it again
+    for copy in 0..2 {
+        let at = h.app.widgets.iter().filter(|(w, _)| *w == toggle).nth(copy).map(|(_, r)| r.center()).unwrap();
+        let r = h.request("ui.click", json!({"x": at.x, "y": at.y}), T);
+        assert_eq!(r["ok"], true, "{r}");
+        h.step_until(SETTLE, |h| h.app.widgets.iter().any(|(w, _)| *w == sub_row));
+        assert_eq!(rows(&h, &sub_row), 1, "copy {copy} opens, the other stays closed");
+        let at = h.app.widgets.iter().filter(|(w, _)| *w == toggle).nth(copy).map(|(_, r)| r.center()).unwrap();
+        let r = h.request("ui.click", json!({"x": at.x, "y": at.y}), T);
+        assert_eq!(r["ok"], true, "{r}");
+        h.settle(SETTLE);
+        assert_eq!(rows(&h, &sub_row), 0, "copy {copy} closes again");
     }
-    assert_eq!(h.app.session.active(), held);
-    // Esc ends it
-    let r = h.request("ui.key", json!({"key": "escape"}), T);
-    assert_eq!(r["ok"], true, "{r}");
-    assert!(!h.app.ui.fullscreen && h.app.ui.slideshow.is_none());
+    let _ = std::fs::remove_dir_all(&base);
     h.settle(SETTLE);
 }
 
@@ -1208,6 +1326,207 @@ fn edit_in_external_editor_opens_the_copy() {
     assert_eq!(calls.len(), 1);
     assert!(calls[0].0.ends_with("-Edit.tif") && std::path::Path::new(&calls[0].0).exists(), "{calls:?}");
     assert_eq!(calls[0].1, "PhotoCraft");
+    let _ = std::fs::remove_dir_all(&dir);
+    h.settle(SETTLE);
+}
+
+/// Edit in PhotoCraft: a PSD copy (what PhotoCraft saves back to), handed to "PhotoCraft" for
+/// the host to find; when the host can't find it, no copy is made.
+#[test]
+fn edit_in_photocraft_opens_a_psd_copy() {
+    let dir = std::env::temp_dir().join(format!("lc-ui-pcraft-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let opened: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = Default::default();
+    let installed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (o, i) = (opened.clone(), installed.clone());
+    let services = Services {
+        png: None,
+        open_with: Some(Box::new(move |path: &str, app: &str| {
+            o.lock().unwrap().push((path.to_string(), app.to_string()));
+            Ok(())
+        })),
+        check_editor: Some(Box::new(move |app: &str| {
+            if app == crate::state::PHOTOCRAFT && !i.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("PhotoCraft isn't installed".into())
+            } else {
+                Ok(())
+            }
+        })),
+        ..Default::default()
+    };
+    let app = LightcraftApp::new(lightcraft_engine::Session::with_demo().with_fs(), services);
+    let mut h = Headless::new(app, [1200.0, 800.0], 1.0);
+    let n = h.app.session.catalog.len();
+    let params = json!({"command": "photo.editInPhotoCraft", "params": {"dir": dir.to_string_lossy()}});
+    let r = h.request("engine.execute", params.clone(), T);
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!((h.app.session.catalog.len(), opened.lock().unwrap().len()), (n, 0), "no copy without PhotoCraft");
+    installed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = h.request("engine.execute", params, T);
+    assert_eq!(r["ok"], true, "{r}");
+    let calls = opened.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].0.ends_with("-Edit.psd") && std::path::Path::new(&calls[0].0).exists(), "{calls:?}");
+    assert_eq!(calls[0].1, "PhotoCraft");
+    let d = lightcraft_codecs::decode(&std::fs::read(&calls[0].0).unwrap(), Default::default()).unwrap();
+    assert_eq!(d.bit_depth, 16, "16-bit by default");
+    // a portable copy: its path is what the host is given; the file follows the settings
+    h.app.ui.settings.photocraft_path = "/opt/pc/photocraft".into();
+    h.app.ui.settings.photocraft_file.format = crate::state::EditFormat::Tiff;
+    h.app.ui.settings.photocraft_file.bit_depth = 8;
+    let r = h.request("engine.execute", json!({"command": "photo.editInPhotoCraft", "params": {"dir": dir.to_string_lossy()}}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let last = opened.lock().unwrap().last().cloned().unwrap();
+    assert!(last.0.ends_with(".tif") && last.1 == "/opt/pc/photocraft", "{last:?}");
+    assert!(crate::menus::ui_enabled(&h.app, "photo.editInPhotoCraft"));
+    let _ = std::fs::remove_dir_all(&dir);
+    h.settle(SETTLE);
+}
+
+/// Open Original in Other Editor: each selected photo's own file (a raw stays a raw) goes to the
+/// configured editor, untouched and without a copy; demo photos and missing files say why.
+#[test]
+fn open_original_in_external_editor_hands_over_the_raw_itself() {
+    use lightcraft_catalog::{Op, Photo, Source};
+    let dir = std::env::temp_dir().join(format!("lc-ui-orig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let opened: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = Default::default();
+    let o = opened.clone();
+    let services = Services {
+        png: None,
+        open_with: Some(Box::new(move |path: &str, app: &str| {
+            o.lock().unwrap().push((path.to_string(), app.to_string()));
+            Ok(())
+        })),
+        check_editor: Some(Box::new(|_: &str| Ok(()))),
+        ..Default::default()
+    };
+    let mut session = lightcraft_engine::Session::with_demo().with_fs();
+    let demo = session.catalog.photos().map(|p| p.id).next().unwrap();
+    let mut file = |name: &str, exists: bool| {
+        let path = dir.join(name);
+        if exists {
+            std::fs::write(&path, b"raw sensor data").unwrap();
+        }
+        let id = session.catalog.alloc_photo_id();
+        let p = Photo::new(id, Source::File { path: path.to_string_lossy().into_owned() }, name, "NEF", 60, 40, "2026-01-01T10:00:00");
+        session.catalog.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+        (id, path.to_string_lossy().into_owned())
+    };
+    let (a, a_path) = file("DSC_0001.NEF", true);
+    let (b, b_path) = file("DSC_0002.NEF", true);
+    let (gone, _) = file("DSC_0003.NEF", false);
+    let app = LightcraftApp::new(session, services);
+    let mut h = Headless::new(app, [1200.0, 800.0], 1.0);
+    h.app.ui.settings.external_editor = "DxO PhotoLab".into();
+    let n = h.app.session.catalog.len();
+
+    exec(&mut h, "library.select", json!({"ids": [a.0, b.0, demo.0]}));
+    let r = exec(&mut h, "photo.openOriginalInExternal", json!({}));
+    let calls = opened.lock().unwrap().clone();
+    assert_eq!(calls, vec![(a_path.clone(), "DxO PhotoLab".to_string()), (b_path.clone(), "DxO PhotoLab".to_string())]);
+    assert_eq!(r["skipped"][0]["id"], demo.0, "{r}");
+    assert_eq!(h.app.session.catalog.len(), n, "no copy is added to the library");
+    assert_eq!(std::fs::read(&a_path).unwrap(), b"raw sensor data", "the original is left as it is");
+    assert!(std::fs::read_dir(&dir).unwrap().count() == 2, "nothing is written next to the originals");
+
+    // the editor can be named per call; the active photo must have a file for the menu
+    let r = exec(&mut h, "photo.openOriginalInExternal", json!({"ids": [a.0], "app": "/opt/dxo"}));
+    assert_eq!(r["opened"][0]["path"], a_path.as_str());
+    assert_eq!(opened.lock().unwrap().last().unwrap().1, "/opt/dxo");
+    exec(&mut h, "library.select", json!({"ids": [a.0]}));
+    assert!(crate::menus::ui_enabled(&h.app, "photo.openOriginalInExternal"));
+    exec(&mut h, "library.select", json!({"ids": [demo.0]}));
+    assert!(!crate::menus::ui_enabled(&h.app, "photo.openOriginalInExternal"));
+
+    // a host that can start the editor once with every file does (DxO PhotoLab keeps one window
+    // and drops the files that arrive while it starts)
+    let batches: std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, String)>>> = Default::default();
+    let bt = batches.clone();
+    h.app.services.open_all_with = Some(Box::new(move |paths: &[String], app: &str| {
+        bt.lock().unwrap().push((paths.to_vec(), app.to_string()));
+        Ok(())
+    }));
+    let singles = opened.lock().unwrap().len();
+    let r = exec(&mut h, "photo.openOriginalInExternal", json!({"ids": [a.0, b.0, demo.0]}));
+    assert_eq!(r["opened"].as_array().map(Vec::len), Some(2), "{r}");
+    assert_eq!(*batches.lock().unwrap(), vec![(vec![a_path.clone(), b_path.clone()], "DxO PhotoLab".to_string())]);
+    assert_eq!(opened.lock().unwrap().len(), singles, "one start for all, not one per file");
+
+    // a demo photo or a missing file: a clear error, nothing opened
+    let calls = opened.lock().unwrap().len();
+    for (ids, why) in [(json!([demo.0]), "demo"), (json!([gone.0]), "missing")] {
+        let r = h.request("engine.execute", json!({"command": "photo.openOriginalInExternal", "params": {"ids": ids}}), T);
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(r.to_string().contains(why), "{r}");
+    }
+    assert_eq!(opened.lock().unwrap().len(), calls);
+    let _ = std::fs::remove_dir_all(&dir);
+    h.settle(SETTLE);
+}
+
+/// Issue #2135: a library record whose original is a program (an imported `.lrcat` names the
+/// paths) is never handed to the opener — the launcher is asked for nothing — and the user is
+/// told why. The path LightCraft does hand over is absolute, whatever the record's spelling.
+#[test]
+fn open_original_refuses_anything_that_is_not_a_photo_file() {
+    use lightcraft_catalog::{Op, Photo, Source};
+    let dir = std::env::temp_dir().join(format!("lc-ui-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let opened: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = Default::default();
+    let batches: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+    let (o, bt) = (opened.clone(), batches.clone());
+    let services = Services {
+        png: None,
+        open_with: Some(Box::new(move |path: &str, app: &str| {
+            o.lock().unwrap().push((path.to_string(), app.to_string()));
+            Ok(())
+        })),
+        open_all_with: Some(Box::new(move |paths: &[String], _: &str| {
+            bt.lock().unwrap().push(paths.to_vec());
+            Ok(())
+        })),
+        check_editor: Some(Box::new(|_: &str| Ok(()))),
+        ..Default::default()
+    };
+    let mut session = lightcraft_engine::Session::with_demo().with_fs();
+    let mut record = |name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, b"MZ").unwrap();
+        let id = session.catalog.alloc_photo_id();
+        let p = Photo::new(id, Source::File { path: path.to_string_lossy().into_owned() }, name, "ARW", 60, 40, "2026-01-01T10:00:00");
+        session.catalog.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+        id
+    };
+    // what a crafted catalog can name as a photo's original
+    let programs = ["payload.exe", "start.lnk", "run.bat", "page.hta", "go.command", "noext"];
+    let bad: Vec<_> = programs.iter().map(|n| record(n)).collect();
+    let good = record("DSC_0001.NEF");
+    let app = LightcraftApp::new(session, services);
+    let mut h = Headless::new(app, [1200.0, 800.0], 1.0);
+    h.app.ui.settings.external_editor = "DxO PhotoLab".into();
+
+    for (id, name) in bad.iter().zip(programs) {
+        let r = h.request("engine.execute", json!({"command": "photo.openOriginalInExternal", "params": {"ids": [id.0]}}), T);
+        assert_eq!(r["ok"], false, "{name} was opened: {r}");
+        assert!(r.to_string().contains("file types LightCraft reads"), "{name}: {r}");
+        // the menu item is greyed out for such a record, so it is never offered either
+        exec(&mut h, "library.select", json!({"ids": [id.0]}));
+        assert!(!crate::menus::ui_enabled(&h.app, "photo.openOriginalInExternal"), "{name} is offered in the menu");
+    }
+    assert!(opened.lock().unwrap().is_empty() && batches.lock().unwrap().is_empty(), "the launcher was asked to open a program");
+
+    // a program selected together with a photo: only the photo is handed over, by absolute path
+    let r = exec(&mut h, "photo.openOriginalInExternal", json!({"ids": [bad[0].0, good.0]}));
+    assert_eq!(r["opened"].as_array().map(Vec::len), Some(1), "{r}");
+    assert!(r["skipped"].to_string().contains("payload.exe"), "{r}");
+    let handed = batches.lock().unwrap().clone();
+    assert_eq!(handed.len(), 1);
+    assert_eq!(handed[0].len(), 1, "{handed:?}");
+    assert!(std::path::Path::new(&handed[0][0]).is_absolute() && handed[0][0].ends_with("DSC_0001.NEF"), "{handed:?}");
     let _ = std::fs::remove_dir_all(&dir);
     h.settle(SETTLE);
 }
@@ -1310,6 +1629,10 @@ fn grid_info_cycles_caption() {
     exec(&mut h, "view.squareGrid", json!({}));
     exec(&mut h, "view.gridInfo", json!({"info": "exposure"}));
     h.settle(SETTLE);
+    // Photo Grid has no captions: picking one shows it in Square Grid
+    exec(&mut h, "view.photoGrid", json!({}));
+    exec(&mut h, "view.gridInfo", json!({"info": "date"}));
+    assert_eq!(h.app.ui.view, crate::state::ViewMode::SquareGrid);
 }
 
 #[test]
@@ -1352,11 +1675,30 @@ fn soft_proofing_flags_out_of_gamut_colours_and_makes_proof_copies() {
     assert_eq!(r["ok"], true, "{r}");
     assert!(h.app.ui.soft_proof);
     let st = exec(&mut h, "view.softProof", json!({"space": "srgb", "destWarning": true}));
-    assert_eq!(st, json!({"on": true, "space": "srgb", "destWarning": true, "displayWarning": false}));
+    assert_eq!(
+        st,
+        json!({"on": true, "space": "srgb", "profile": null, "intent": "perceptual", "paperInk": false, "destWarning": true, "displayWarning": false})
+    );
     h.settle(SETTLE);
     assert!(red(&h) > before, "out-of-gamut colours are painted red");
     let r = h.request("engine.execute", json!({"command": "view.softProof", "params": {"space": "cmyk"}}), T);
     assert_ne!(r["ok"], true);
+    // a device (printer) profile, its intent and Simulate Paper & Ink
+    let dir = std::env::temp_dir().join(format!("proof-profile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let icc = dir.join("printer.icc");
+    std::fs::write(&icc, lightcraft_codecs::icc::write_named(lightcraft_codecs::NamedSpace::Srgb)).unwrap();
+    let st = exec(&mut h, "view.softProof", json!({"profile": icc.to_string_lossy(), "intent": "relative", "paperInk": true}));
+    assert_eq!((st["intent"].as_str(), st["paperInk"].as_bool()), (Some("relative"), Some(true)), "{st}");
+    assert!(st["profile"]["name"].as_str().is_some_and(|n| !n.is_empty()), "{st}");
+    assert_ne!(h.app.ui.proof.profile, 0);
+    h.settle(SETTLE);
+    assert!(red(&h) > before, "the device gamut is flagged too");
+    let r = h.request("engine.execute", json!({"command": "view.softProof", "params": {"profile": "/nonexistent.icc"}}), T);
+    assert_ne!(r["ok"], true);
+    let st = exec(&mut h, "view.softProof", json!({"profile": null}));
+    assert_eq!((st["profile"].clone(), h.app.ui.proof.profile), (json!(null), 0));
+    let _ = std::fs::remove_dir_all(&dir);
     // Create Proof Copy: a virtual copy named after the proof
     let n = h.app.session.catalog.photos().count();
     let r = h.request("ui.clickWidget", json!({"id": "button:createProofCopy"}), T);
@@ -1404,7 +1746,8 @@ fn ai_masks_without_the_model_offer_the_download() {
         assert!(h.app.widgets.iter().any(|(id, _)| id == "link:samHelp"), "no installation guide link");
         let shown = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let log = shown.clone();
-        h.app.services.reveal = Some(Box::new(move |p: &str| {
+        h.app.services.open_with = Some(Box::new(move |p: &str, editor: &str| {
+            assert_eq!(editor, "", "open the model directory with the default application");
             log.lock().unwrap().push(p.to_string());
             Ok(())
         }));
@@ -1920,4 +2263,248 @@ fn color_range_pick_button_samples_the_photo() {
     click(&mut h, "button:colorPick0");
     assert!(h.app.ui.tool.is_empty());
     h.settle(SETTLE);
+}
+
+#[test]
+fn a_selected_develop_slider_accepts_wheel_nudges() {
+    let mut h = detail("panel.edit");
+    // the demo may open on the Edit panel already, which `panel.edit` then toggles shut
+    let r = h.request("ui.set", json!({"right": "edit"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    let name = "slider:light.exposure";
+    let panel = h.app.widgets.iter().find(|(id, _)| id == "panel:right_panel").unwrap().1;
+    let track = h.app.widgets.iter().find(|(id, _)| id == name).unwrap().1;
+    assert!(panel.contains(track.center()), "slider must be visible before interaction");
+
+    let result = h.request("ui.clickWidget", json!({"id": name, "fx": 0.5}), T);
+    assert_eq!(result["ok"], true, "{result}");
+    let before = lightcraft_develop::controls::get(&develop(&h), "light.exposure").expect("exposure");
+
+    // A wheel event over the selected control adjusts exposure instead of
+    // scrolling the right sidebar (an unselected slider leaves scrolling alone).
+    // (120 points is more than one notch, `theme::WHEEL_LINE_POINTS`; egui smooths it over a few frames)
+    let result = h.request("ui.scroll", json!({"dy": 120.0}), T);
+    assert_eq!(result["ok"], true, "{result}");
+    for _ in 0..10 {
+        h.step();
+    }
+    let after = lightcraft_develop::controls::get(&develop(&h), "light.exposure").expect("exposure");
+    assert!(after > before, "selected exposure did not increase: {before} -> {after}");
+}
+
+/// Scrolling sideways over a slider adjusts it without selecting it first: a trackpad swipe
+/// right raises the value, left lowers it, and Shift+wheel (sideways scrolling with a mouse) does
+/// the same. A mostly vertical swipe still scrolls the panel and leaves the slider alone.
+#[test]
+fn sideways_scrolling_adjusts_the_slider_under_the_pointer() {
+    let mut h = detail("panel.edit");
+    let r = h.request("ui.set", json!({"right": "edit"}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    let exposure = |h: &Headless| lightcraft_develop::controls::get(&develop(h), "light.exposure").expect("exposure");
+    let scroll = |h: &mut Headless, params: serde_json::Value| {
+        // the pointer rests on the track, the slider is not clicked
+        let r = h.request("ui.hoverWidget", json!({"id": "slider:light.exposure"}), T);
+        assert_eq!(r["ok"], true, "{r}");
+        let before = exposure(h);
+        let r = h.request("ui.scroll", params, T);
+        assert_eq!(r["ok"], true, "{r}");
+        for _ in 0..10 {
+            h.step();
+        }
+        exposure(h) - before
+    };
+    assert!(scroll(&mut h, json!({"dx": 120.0})) > 0.0, "a swipe right raises the value");
+    assert!(scroll(&mut h, json!({"dx": -120.0})) < 0.0, "a swipe left lowers it");
+    assert!(scroll(&mut h, json!({"dy": 120.0, "shift": true})) > 0.0, "Shift+wheel scrolls sideways");
+    let undo = h.app.session.undo.len();
+    assert_eq!(scroll(&mut h, json!({"dx": 30.0, "dy": -120.0})), 0.0, "a mostly vertical swipe leaves the slider alone");
+    assert_eq!(h.app.session.undo.len(), undo);
+}
+
+/// Issue #517: a fast brush stroke (pointer samples several brush widths apart) shows on the photo
+/// while the button is held as the continuous, feathered band it will be once committed, not as
+/// separate dabs at the samples with gaps between them.
+#[test]
+fn a_fast_brush_stroke_shows_without_gaps_before_the_button_is_released() {
+    let mut h = detail("panel.masking");
+    h.settle(SETTLE);
+    exec(&mut h, "tool.brush", json!({"new": true}));
+    let r = h.request("ui.set", json!({"brushSize": 0.03, "brushFeather": 50.0, "brushFlow": 100.0}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    // the photo before painting, and where a normalized image point is on screen
+    pointer(&mut h, json!([{"kind": "move", "x": 0.02, "y": 0.02}]));
+    h.settle(SETTLE);
+    let photo = h.paint();
+    let img = h.app.image_rect.expect("the photo is on screen");
+    let ppp = h.pixels_per_point;
+    let px = |im: &egui::ColorImage, x: f32, y: f32| {
+        let (sx, sy) = (((img.left() + x * img.width()) * ppp) as usize, ((img.top() + y * img.height()) * ppp) as usize);
+        let c = im.pixels[sy * im.size[0] + sx];
+        [c.r() as f32, c.g() as f32, c.b() as f32]
+    };
+    // a drag that starts (past egui's drag threshold, at `a`) and then moves fast: samples far
+    // apart, button held
+    let (a, b, c) = ((0.17_f32, 0.4_f32), (0.5_f32, 0.4_f32), (0.85_f32, 0.4_f32));
+    pointer(
+        &mut h,
+        json!([{"kind": "down", "x": 0.15, "y": a.1}, {"kind": "drag", "x": a.0, "y": a.1}, {"kind": "drag", "x": b.0, "y": b.1}, {"kind": "drag", "x": c.0, "y": c.1}]),
+    );
+    assert!(matches!(h.app.gesture, Some(crate::panels::detail::Gesture::Brush { .. })), "still painting");
+    let held = h.paint();
+    let [r0, g0, b0] = h.app.ui.mask_overlay_color.map(|v| v as f32);
+    let op = h.app.ui.mask_overlay_opacity / 100.0;
+    // along the centreline between the samples (away from the cursor ring at the last one), the
+    // overlay colour at full coverage over the photo
+    let mut gaps = vec![];
+    for i in 1..=74 {
+        let x = a.0 + (c.0 - a.0) * i as f32 / 80.0;
+        let p = px(&photo, x, a.1);
+        let want = [p[0] + (r0 - p[0]) * op, p[1] + (g0 - p[1]) * op, p[2] + (b0 - p[2]) * op];
+        let got = px(&held, x, a.1);
+        if (0..3).any(|k| (got[k] - want[k]).abs() > 12.0) {
+            gaps.push((x, got, want));
+        }
+    }
+    assert!(gaps.is_empty(), "the live stroke has gaps: {} of 74 points, first {:?}", gaps.len(), gaps.first());
+    pointer(&mut h, json!([{"kind": "up", "x": c.0, "y": c.1}]));
+    let d = develop(&h);
+    let MaskShape::Brush { strokes } = &d.masks[0].components[0].shape else { panic!("brush") };
+    assert!(strokes[0].points.len() >= 3, "{strokes:?}");
+    // committed: the rendered overlay covers what the live stroke did, feather included
+    h.settle(SETTLE);
+    let done = h.paint();
+    for (x, y) in [(0.3, a.1), (0.6, a.1), (0.3, a.1 + 0.02), (0.6, a.1 - 0.025), (0.45, a.1 + 0.06)] {
+        let (l, k) = (px(&held, x, y), px(&done, x, y));
+        assert!((0..3).all(|i| (l[i] - k[i]).abs() < 24.0), "live {l:?} vs committed {k:?} at ({x}, {y})");
+    }
+}
+
+#[test]
+fn effect_dropdown_applies_saves_and_shows_the_matching_effect() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "radial"}));
+    exec(&mut h, "mask.adjust", json!({"values": {"exposure": 0.7, "shadows": 25, "amount": 80}}));
+    h.step();
+    // save the mask's sliders from the menu (the New Effect Preset dialog)
+    click(&mut h, "dropdown:maskEffect");
+    click(&mut h, "maskEffectMenu:save");
+    let mut dlg = h.app.ui.dialog.take().expect("the save dialog opens");
+    match &mut dlg {
+        crate::state::Dialog::SaveEffect { name, .. } => *name = "Lift".into(),
+        d => panic!("the save dialog opens: {d:?}"),
+    }
+    let r = crate::panels::dialogs::confirm_dialog(&mut h.app, &dlg);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(h.app.session.mask_effects.len(), 1);
+    // change the sliders, then pick the effect again: sliders back, Amount kept
+    exec(&mut h, "mask.adjust", json!({"values": {"exposure": -1, "clarity": 40, "amount": 50}}));
+    h.step();
+    click(&mut h, "dropdown:maskEffect");
+    click(&mut h, "maskEffect:Lift");
+    let a = develop(&h).masks.last().expect("a mask").adjust;
+    assert_eq!((a.exposure, a.shadows, a.clarity, a.amount), (0.7, 25.0, 0.0, 50.0));
+    assert_eq!(exec(&mut h, "mask.effects", json!({}))["current"], "Lift");
+}
+
+#[test]
+fn masking_review_history_preserves_surviving_component_after_insert_and_delete() {
+    for floating in [false, true] {
+        let mut h = detail("panel.masking");
+        exec(&mut h, "mask.add", json!({"kind": "linear"}));
+        exec(&mut h, "mask.addComponent", json!({"kind": "radial"}));
+        exec(&mut h, "mask.addComponent", json!({"kind": "brush"}));
+        exec(&mut h, "ui.maskPanel", json!({"floating": floating}));
+        let original = develop(&h);
+        // Use explicit selection to avoid repeated row clicks entering double-click rename.
+        // Delete an earlier, unselected row through the same command as its component menu.
+        for removed in [0, 1] {
+            exec(&mut h, "mask.selectComponent", json!({"component": 2}));
+            exec(&mut h, "mask.component", json!({"component": removed, "action": "delete"}));
+            assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, 1)));
+            exec(&mut h, "edit.undo", json!({}));
+            assert_eq!(develop(&h), original);
+            assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, 2)), "the same brush survives undo");
+            assert_eq!(h.app.ui.tool, "brush");
+            exec(&mut h, "edit.redo", json!({}));
+            assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, 1)));
+            exec(&mut h, "edit.undo", json!({}));
+        }
+        exec(&mut h, "mask.component", json!({"component": 0, "action": "duplicate"}));
+        exec(&mut h, "mask.selectComponent", json!({"component": 3}));
+        exec(&mut h, "edit.undo", json!({}));
+        assert_eq!(develop(&h), original);
+        assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, 2)));
+        exec(&mut h, "edit.redo", json!({}));
+        assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, 3)));
+        exec(&mut h, "edit.undo", json!({}));
+        let response = h.request("ui.key", json!({"key": "Backspace"}), T);
+        assert_eq!(response["ok"], true);
+        assert_eq!(develop(&h).masks[0].components, original.masks[0].components[..2], "Delete still targets C, not B");
+        h.settle(SETTLE);
+    }
+}
+
+#[test]
+fn masking_review_brush_shortcut_synchronizes_controls_painting_and_delete() {
+    for floating in [false, true] {
+        let mut h = detail("panel.masking");
+        exec(&mut h, "mask.add", json!({"kind": "brush"}));
+        exec(&mut h, "mask.addComponent", json!({"kind": "brush", "op": "subtract"}));
+        exec(&mut h, "mask.addComponent", json!({"kind": "radial"}));
+        exec(&mut h, "ui.maskPanel", json!({"floating": floating}));
+        let before = develop(&h);
+        let undo = h.app.session.undo.len();
+        let response = h.request("ui.key", json!({"key": "B"}), T);
+        assert_eq!(response["ok"], true);
+        assert_eq!(h.app.ui.tool, "brush");
+        assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, 1)));
+        assert!(h.app.widgets.iter().any(|(id, _)| id == "slider:ui.brushSize"));
+        assert_eq!(develop(&h), before, "activating an existing brush is not a photo edit");
+        assert_eq!(h.app.session.undo.len(), undo);
+        brush_at(&mut h, 0.25, 0.3);
+        let painted = develop(&h);
+        assert_eq!(painted.masks[0].components[0], before.masks[0].components[0]);
+        assert_eq!(painted.masks[0].components[2], before.masks[0].components[2]);
+        let MaskShape::Brush { strokes } = &painted.masks[0].components[1].shape else { panic!("brush") };
+        assert_eq!(strokes.len(), 1);
+        // An explicitly selected earlier brush wins over the fallback to the last brush.
+        click(&mut h, "component:0");
+        exec(&mut h, "tool.brush", json!({}));
+        assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, 0)));
+        click(&mut h, "component:2");
+        h.request("ui.key", json!({"key": "B"}), T);
+        h.request("ui.key", json!({"key": "Backspace"}), T);
+        assert_eq!(develop(&h).masks[0].components, vec![before.masks[0].components[0].clone(), before.masks[0].components[2].clone()]);
+        h.settle(SETTLE);
+    }
+}
+
+#[test]
+fn masking_review_pending_brush_selects_its_first_stroke_without_an_extra_edit() {
+    for existing_mask in [false, true] {
+        let mut h = detail("panel.masking");
+        if existing_mask {
+            exec(&mut h, "mask.add", json!({"kind": "radial"}));
+        }
+        let before = develop(&h);
+        let undo = h.app.session.undo.len();
+        exec(&mut h, "tool.brush", json!({}));
+        assert_eq!(develop(&h), before);
+        assert_eq!(h.app.session.undo.len(), undo);
+        assert_eq!(crate::panels::masking::selected_component(&h.app), None, "a pending brush must not retain a radial selection");
+        assert!(h.app.widgets.iter().any(|(id, _)| id == "slider:ui.brushSize"));
+        brush_at(&mut h, 0.25, 0.3);
+        let index = usize::from(existing_mask);
+        assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, index)));
+        assert_eq!(h.app.session.undo.len(), undo + 1, "the first stroke and its brush are one undo step");
+        let painted = develop(&h);
+        assert!(matches!(painted.masks[0].components[index].shape, MaskShape::Brush { .. }));
+        exec(&mut h, "edit.undo", json!({}));
+        assert_eq!(develop(&h), before);
+        exec(&mut h, "edit.redo", json!({}));
+        assert_eq!(develop(&h), painted);
+        h.settle(SETTLE);
+    }
 }
