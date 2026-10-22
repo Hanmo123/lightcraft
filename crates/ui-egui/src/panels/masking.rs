@@ -13,7 +13,9 @@ use crate::theme::Tokens;
 use crate::widgets::{divider, icon_button, one_line, register, slider, text_button};
 
 mod workspace;
-pub(crate) use workspace::{command as workspace_command, floating, select_brush, selected_component, selection_changed, tool_component};
+pub(crate) use workspace::{
+    command as workspace_command, floating, select_brush, selected_component, selection_changed, selection_completed, tool_component,
+};
 
 const fn spec(id: &'static str, label: &'static str, min: f64, max: f64, step: f64, decimals: u8, track: Track) -> ControlSpec {
     ControlSpec { id, label, section: Section::Light, min, max, default: 0.0, step, decimals, track }

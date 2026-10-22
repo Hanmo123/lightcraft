@@ -482,6 +482,37 @@ fn mask_adjustments_hide_overlay_without_disabling_the_mask() {
     h.settle(SETTLE);
 }
 
+/// A slider hides the overlay (above); a new mask, an added part, a duplicate or picking a mask in
+/// the list shows it again, so the Overlay menu's mode is what the photo shows (issue #1800).
+#[test]
+fn a_new_or_picked_mask_shows_the_overlay_hidden_by_a_slider() {
+    use lightcraft_pipeline::Overlay;
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind": "linear", "start": [0.5, 0.2], "end": [0.5, 0.7]}));
+    let first = h.app.session.active_mask.unwrap();
+    let hide = |h: &mut Headless| {
+        exec(h, "mask.adjust", json!({"values": {"exposure": 0.5}}));
+        assert!(!h.app.ui.mask_overlay);
+    };
+    let shown = |h: &Headless| matches!(crate::panels::detail::view_overlay(&h.app, &develop(h)), Overlay::Mask { .. });
+    hide(&mut h);
+    exec(&mut h, "mask.add", json!({"kind": "radial", "center": [0.4, 0.5], "rx": 0.2, "ry": 0.2}));
+    assert!(shown(&h), "a new mask shows its overlay");
+    hide(&mut h);
+    let r = h.request("ui.clickWidget", json!({"id": format!("mask:{first}")}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(h.app.session.active_mask, Some(first));
+    assert!(shown(&h), "picking a mask in the list shows its overlay");
+    for (cmd, params) in
+        [("mask.addComponent", json!({"kind": "radial", "op": "add", "center": [0.6, 0.5], "rx": 0.1, "ry": 0.1})), ("mask.duplicate", json!({}))]
+    {
+        hide(&mut h);
+        exec(&mut h, cmd, params);
+        assert!(shown(&h), "{cmd} shows the overlay");
+    }
+    h.settle(SETTLE);
+}
+
 #[test]
 fn radial_body_drag_moves_rotated_components_and_undoes_once() {
     let mut h = detail("panel.masking");
@@ -827,6 +858,55 @@ fn crop_drag_activates_the_remembered_ratio_and_undo_restores_the_photo() {
     assert_eq!(h.app.session.undo.len(), undo + 1);
     exec(&mut h, "edit.undo", json!({}));
     assert_eq!(develop(&h), before);
+}
+
+/// Issue #991: with no aspect ever chosen, a crop starts locked to the photo's own shape (Lightroom's
+/// default), so a handle drag keeps the proportions; after the Lock is switched off once, the next
+/// photo's crop starts free again.
+#[test]
+fn a_fresh_crop_starts_locked_to_original_until_the_lock_is_switched_off() {
+    let mut h = detail("panel.crop");
+    h.app.ui.crop_default_aspect = None;
+    h.settle(SETTLE);
+    let before = develop(&h);
+    assert!(before.crop.aspect.is_none());
+    let p = h.app.session.catalog.photo(h.app.session.active().unwrap()).unwrap().clone();
+    let own = (p.width * 100, p.height * 100);
+    assert_eq!(h.app.crop_tool_aspect(), Some(own), "the Lock shows engaged on an untouched photo");
+    let drag = json!({"events": [
+        {"kind": "down", "x": 0.995, "y": 0.995},
+        {"kind": "drag", "x": 0.85, "y": 0.85},
+        {"kind": "drag", "x": 0.75, "y": 0.75},
+        {"kind": "up", "x": 0.75, "y": 0.75}
+    ]});
+    let r = h.request("ui.pointer", drag.clone(), T);
+    assert_eq!(r["ok"], true, "{r}");
+    h.settle(SETTLE);
+    assert_eq!(develop(&h).crop.aspect, Some(own), "the drag kept the photo's proportions");
+    assert_eq!(h.app.ui.crop_default_aspect, None, "nothing was chosen explicitly");
+    exec(&mut h, "edit.undo", json!({}));
+    assert_eq!(develop(&h), before);
+    // Lock off once: remembered as free, and from then on the same drag crops without a ratio
+    let mut h = detail("panel.crop");
+    h.app.ui.crop_default_aspect = None;
+    h.settle(SETTLE);
+    h.app.run("crop.aspect", json!({"aspect": "toggle"})).unwrap();
+    h.settle(SETTLE);
+    assert_eq!(h.app.ui.crop_default_aspect, Some(json!("free")));
+    assert_eq!(h.app.crop_tool_aspect(), None);
+    let before = develop(&h);
+    // a rotating drag outside the box (any crop drag starts cropping); the release on its own
+    for events in [
+        json!([{"kind": "down", "x": -0.05, "y": 0.2}, {"kind": "drag", "x": -0.05, "y": 0.25}, {"kind": "drag", "x": -0.05, "y": 0.3}]),
+        json!([{"kind": "up", "x": -0.05, "y": 0.3}]),
+    ] {
+        let r = h.request("ui.pointer", json!({ "events": events }), T);
+        assert_eq!(r["ok"], true, "{r}");
+        h.settle(SETTLE);
+    }
+    assert_ne!(develop(&h).crop, before.crop, "the drag cropped");
+    assert_eq!(develop(&h).crop.aspect, None, "and left the ratio free");
+    let _ = drag;
 }
 
 /// A remembered ratio the crop command refuses (a hand-edited settings file) is forgotten, and the
@@ -2291,6 +2371,36 @@ fn a_selected_develop_slider_accepts_wheel_nudges() {
     }
     let after = lightcraft_develop::controls::get(&develop(&h), "light.exposure").expect("exposure");
     assert!(after > before, "selected exposure did not increase: {before} -> {after}");
+    for _ in 0..40 {
+        h.step();
+    }
+    let before_leaving = develop(&h).light.exposure;
+    // Leaving the row disarms wheel edits, but must not take keyboard arrows away.
+    h.request("ui.move", json!({"x": panel.left() - 10.0, "y": track.center().y}), T);
+    h.request("ui.hoverWidget", json!({"id": name}), T);
+    // More than a full notch: disarming dropped the wheel remainder, so this alone would edit it.
+    h.request("ui.scroll", json!({"dy": -240.0}), T);
+    for _ in 0..40 {
+        h.step();
+    }
+    assert_eq!(develop(&h).light.exposure, before_leaving, "returning to a slider while scrolling must not edit it (issue #1355)");
+    h.request("ui.move", json!({"x": panel.left() - 10.0, "y": track.center().y}), T);
+    h.request("ui.key", json!({"key": "ArrowUp"}), T);
+    assert!(develop(&h).light.exposure > before_leaving, "keyboard adjustment survives leaving the slider");
+
+    // Scroll back to the top, then explicitly select it again to re-enable wheel nudges.
+    h.request("ui.move", json!({"x": panel.right() - 8.0, "y": panel.center().y}), T);
+    h.request("ui.scroll", json!({"dy": 600.0}), T);
+    for _ in 0..40 {
+        h.step();
+    }
+    click(&mut h, name);
+    let before_reselecting = develop(&h).light.exposure;
+    h.request("ui.scroll", json!({"dy": 120.0}), T);
+    for _ in 0..40 {
+        h.step();
+    }
+    assert!(develop(&h).light.exposure > before_reselecting, "a new click re-enables wheel adjustment");
 }
 
 /// Scrolling sideways over a slider adjusts it without selecting it first: a trackpad swipe
@@ -2506,5 +2616,171 @@ fn masking_review_pending_brush_selects_its_first_stroke_without_an_extra_edit()
         exec(&mut h, "edit.redo", json!({}));
         assert_eq!(develop(&h), painted);
         h.settle(SETTLE);
+    }
+}
+
+/// A retained component selection follows history even while another panel owns the tools.
+#[test]
+fn masking_review_hidden_panel_history_keeps_delete_target() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind":"linear"}));
+    exec(&mut h, "mask.addComponent", json!({"kind":"radial"}));
+    exec(&mut h, "mask.addComponent", json!({"kind":"brush"}));
+    let original = develop(&h);
+    exec(&mut h, "mask.component", json!({"component":1,"action":"delete"}));
+    exec(&mut h, "panel.edit", json!({}));
+    for (command, index) in [("edit.undo", 2), ("edit.redo", 1), ("edit.undo", 2)] {
+        exec(&mut h, command, json!({}));
+        assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, index)));
+        assert!(h.app.ui.tool.is_empty(), "history must not arm the brush in Edit");
+    }
+    exec(&mut h, "panel.masking", json!({}));
+    h.request("ui.key", json!({"key":"Backspace"}), T);
+    assert_eq!(develop(&h).masks[0].components, original.masks[0].components[..2]);
+}
+
+/// A queued description hasn't created a row; a pending Object already has one.
+#[test]
+fn masking_review_pending_ai_creation_waits_for_a_real_component() {
+    let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Services::default());
+    app.ui.right = RightPanel::Masking;
+    app.run("mask.add", json!({"kind":"radial"})).unwrap();
+    app.run("mask.addComponent", json!({"kind":"brush"})).unwrap();
+    app.run("mask.selectComponent", json!({"component":0})).unwrap();
+    let selected = app.ui.mask_component;
+    for command in ["mask.add", "mask.addComponent"] {
+        // Worker-independent delivery of the documented queued Describe response.
+        crate::panels::masking::selection_changed(&mut app, command, &json!({"kind":"prompt"}), &json!({"pending":true}), None);
+        assert_eq!(app.ui.mask_component, selected);
+        assert_eq!(app.ui.tool, "radial");
+    }
+    let photo = app.session.active().unwrap();
+    // Use stored coverage to create an Object without a model, then deliver the same
+    // pending response as a worker-backed Object that already created its placeholder.
+    let seg = lightcraft_develop::SegMask::from_logits(2, &[8.0, -8.0, 8.0, -8.0]);
+    let mut result = app.session.execute("mask.addComponent", &json!({"kind":"object","seg":seg})).unwrap();
+    result["pending"] = json!(true);
+    crate::panels::masking::selection_changed(&mut app, "mask.addComponent", &json!({"kind":"object"}), &result, None);
+    assert_eq!(app.ui.mask_component, Some((photo, 1, 2)));
+    assert_eq!(app.ui.tool, "object");
+    // A completed Describe uses stored segmentation and then selects the created row.
+    app.session.execute("mask.addComponent", &json!({"kind":"prompt","text":"tree","seg":seg})).unwrap();
+    crate::panels::masking::selection_completed(&mut app, photo, 1, 3);
+    assert_eq!(app.ui.mask_component, Some((photo, 1, 3)));
+    assert!(app.ui.tool.is_empty());
+    app.run("mask.add", json!({"kind":"radial"})).unwrap();
+    let selected = app.ui.mask_component;
+    crate::panels::masking::selection_completed(&mut app, photo, 1, 3);
+    assert_eq!(app.ui.mask_component, selected, "an unrelated completion cannot select another mask");
+}
+
+/// Report write failures while following the edits actually applied in memory.
+#[test]
+fn masking_review_unsaved_edits_keep_component_selection_in_sync() {
+    use lightcraft_catalog::{MemStore, Store};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    #[derive(Clone, Default)]
+    struct FailingAppend {
+        files: MemStore,
+        fail: Arc<AtomicBool>,
+    }
+    impl Store for FailingAppend {
+        fn read(&mut self, name: &str) -> std::io::Result<Option<Vec<u8>>> {
+            self.files.read(name)
+        }
+        fn write_atomic(&mut self, name: &str, data: &[u8]) -> std::io::Result<()> {
+            self.files.write_atomic(name, data)
+        }
+        fn append(&mut self, name: &str, data: &[u8]) -> std::io::Result<()> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("disk full"));
+            }
+            self.files.append(name, data)
+        }
+        fn truncate(&mut self, name: &str, len: u64) -> std::io::Result<()> {
+            self.files.truncate(name, len)
+        }
+        fn describe(&self) -> String {
+            "mask review failing journal".into()
+        }
+    }
+    let store = FailingAppend::default();
+    let mut session = lightcraft_engine::Session::new();
+    session
+        .open_library_in(
+            lightcraft_engine::library::LibraryStores {
+                dir: "mask-review".into(),
+                catalog: Box::new(store.clone()),
+                files: Box::new(MemStore::new()),
+                on_disk: false,
+            },
+            true,
+        )
+        .unwrap();
+    let mut app = LightcraftApp::new(session, Services::default());
+    app.ui.right = RightPanel::Masking;
+    for kind in ["linear", "radial", "brush"] {
+        let command = if kind == "linear" { "mask.add" } else { "mask.addComponent" };
+        app.run(command, json!({"kind":kind})).unwrap();
+    }
+    store.fail.store(true, Ordering::SeqCst);
+    for (command, params, index) in [
+        ("mask.component", json!({"component":1,"action":"delete"}), 1),
+        ("edit.undo", json!({}), 2),
+        ("edit.redo", json!({}), 1),
+        ("mask.component", json!({"component":1,"action":"move","to":0}), 0),
+        ("mask.component", json!({"component":0,"action":"move","delta":1}), 1),
+        ("mask.component", json!({"component":0,"action":"duplicate"}), 1),
+        ("mask.addComponent", json!({"kind":"radial"}), 3),
+    ] {
+        let e = app.run_typed(command, params).unwrap_err();
+        assert_eq!(e.kind, lightcraft_engine::ErrorKind::NotSaved);
+        assert_eq!(crate::panels::masking::selected_component(&app), Some((1, index)), "{command}");
+    }
+    let before = app.ui.mask_component;
+    let e = app.run_typed("mask.component", json!({"component":99,"action":"delete"})).unwrap_err();
+    assert_ne!(e.kind, lightcraft_engine::ErrorKind::NotSaved);
+    assert_eq!(app.ui.mask_component, before, "rejected edits cannot change selection");
+    assert!(app.session.unsaved().is_some());
+    store.fail.store(false, Ordering::SeqCst);
+    app.session.persist().unwrap();
+    assert!(app.session.unsaved().is_none());
+}
+
+/// Away from radial bodies and handles, the first linear is a fallback even after other kinds.
+#[test]
+fn masking_review_linear_canvas_fallback_finds_later_components() {
+    let mut h = detail("panel.masking");
+    exec(&mut h, "mask.add", json!({"kind":"radial","center":[0.2,0.2],"rx":0.1,"ry":0.1}));
+    exec(&mut h, "mask.addComponent", json!({"kind":"linear","start":[0.3,0.3],"end":[0.7,0.3]}));
+    exec(&mut h, "mask.addComponent", json!({"kind":"linear","start":[0.3,0.6],"end":[0.7,0.6]}));
+    exec(&mut h, "mask.addComponent", json!({"kind":"luminanceRange"}));
+    for index in [1, 2] {
+        if index == 1 {
+            exec(&mut h, "mask.select", json!({"id":1}));
+        } else {
+            exec(&mut h, "mask.selectComponent", json!({"component":2}));
+        }
+        let before = develop(&h);
+        pointer(
+            &mut h,
+            json!([
+                {"kind":"down","x":0.85,"y":0.85}, {"kind":"drag","x":0.87,"y":0.83},
+                {"kind":"drag","x":0.92,"y":0.78}, {"kind":"up","x":0.92,"y":0.78}
+            ]),
+        );
+        let after = develop(&h);
+        for i in 0..4 {
+            if i == index {
+                assert_ne!(after.masks[0].components[i], before.masks[0].components[i]);
+            } else {
+                assert_eq!(after.masks[0].components[i], before.masks[0].components[i]);
+            }
+        }
+        assert_eq!(crate::panels::masking::selected_component(&h.app), Some((1, index)));
+        exec(&mut h, "edit.undo", json!({}));
     }
 }

@@ -214,6 +214,7 @@ fn history_component(before: &lightcraft_develop::Mask, after: &lightcraft_devel
     selected
 }
 
+/// Reconcile row selection after an applied command, including edits not yet saved to disk.
 pub fn selection_changed(
     app: &mut LightcraftApp,
     command: &str,
@@ -236,14 +237,17 @@ pub fn selection_changed(
     ) {
         return;
     }
-    if matches!(command, "edit.undo" | "edit.redo") && app.ui.right != crate::state::RightPanel::Masking {
+    // Describe queues creation; Object can already have created a placeholder while its
+    // segmentation is pending. Only the latter returns the ordinary activeMask field.
+    if result.get("pending").and_then(Value::as_bool) == Some(true) && result.get("activeMask").is_none() {
         return;
     }
     let action = params.get("action").and_then(Value::as_str);
     if command == "mask.component" && !matches!(action, Some("delete" | "duplicate" | "move")) {
         return;
     }
-    if command == "mask.component" && action == Some("move") && result.get("mask").and_then(Value::as_u64) != app.session.active_mask.map(u64::from) {
+    let affected_mask = result.get("mask").or_else(|| params.get("id")).and_then(Value::as_u64).or(app.session.active_mask.map(u64::from));
+    if command == "mask.component" && action == Some("move") && affected_mask != app.session.active_mask.map(u64::from) {
         return;
     }
     let Some(photo) = app.session.active() else { return };
@@ -266,7 +270,9 @@ pub fn selection_changed(
     {
         // Parent selection stays distinct from the component whose tool/settings are shown.
         app.ui.mask_component = None;
-        app.ui.tool = m.components.last().map(|c| tool_for(&c.shape)).unwrap_or("").into();
+        if app.ui.right == crate::state::RightPanel::Masking {
+            app.ui.tool = m.components.last().map(|c| tool_for(&c.shape)).unwrap_or("").into();
+        }
         return;
     }
     let changed = params.get("component").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
@@ -275,8 +281,16 @@ pub fn selection_changed(
         "mask.brushStroke" => changed.or_else(|| m.components.iter().rposition(|c| matches!(c.shape, MaskShape::Brush { .. }))),
         "mask.component" => match (action, changed, previous) {
             (Some("move"), _, selected) => {
-                let from = result.get("from").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
-                let to = result.get("to").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
+                // NotSaved has no success payload, but the validated move is already applied.
+                let from = result.get("from").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).or(changed);
+                let to = result.get("to").or_else(|| params.get("to")).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).or_else(|| {
+                    let from = from?;
+                    match params.get("delta").and_then(Value::as_i64) {
+                        Some(-1) => Some(from.saturating_sub(1)),
+                        Some(1) => Some(from.saturating_add(1).min(m.components.len().saturating_sub(1))),
+                        _ => None,
+                    }
+                });
                 match (from, to) {
                     (Some(from), Some(to)) => Some(selected.map_or(to, |i| moved_index(i, from, to))),
                     _ => selected,
@@ -292,7 +306,21 @@ pub fn selection_changed(
         _ => previous,
     };
     let Some(last) = m.components.len().checked_sub(1) else { return };
-    let _ = command_select(app, m.id, preferred.unwrap_or(last).min(last));
+    app.session.active_mask = Some(m.id);
+    selection_completed(app, photo, m.id, preferred.unwrap_or(last).min(last));
+}
+
+/// Follow an applied component creation/edit without activating tools in another panel.
+/// Background completion for a different photo or mask cannot redirect the current selection.
+pub fn selection_completed(app: &mut LightcraftApp, photo: PhotoId, mask: u32, index: usize) {
+    if app.session.active() != Some(photo) || app.session.active_mask != Some(mask) {
+        return;
+    }
+    let tool = app.ui.tool.clone();
+    let _ = command_select(app, mask, index);
+    if app.ui.right != crate::state::RightPanel::Masking {
+        app.ui.tool = tool;
+    }
 }
 
 fn command_select(app: &mut LightcraftApp, mask: u32, component: usize) -> Result<Value, String> {
@@ -493,7 +521,7 @@ fn mask_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_develop::
             if resp.double_clicked() {
                 app.ui.renaming_mask = Some((m.id, m.name.clone()));
             }
-            resp.context_menu(|ui| mask_menu(app, ui, m.id, &m.name, m.visible, index, count));
+            crate::widgets::context_menu(&resp, |ui| mask_menu(app, ui, m.id, &m.name, m.visible, index, count));
         }
         if selected {
             egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 6, top: 0, bottom: 6 }).show(ui, |ui| {
@@ -611,7 +639,7 @@ fn component_row(app: &mut LightcraftApp, ui: &mut egui::Ui, m: &lightcraft_deve
             app.ui.renaming_component = Some((m.id, i, label.clone()));
         }
         let tooltip = operation.map_or_else(|| text.clone(), |(_, op)| format!("{}: {text}", crate::i18n::tr(op)));
-        resp.on_hover_text(tooltip).context_menu(|ui| component_row_menu(app, ui, m.id, i, &label, m.components.len()));
+        crate::widgets::context_menu(&resp.on_hover_text(tooltip), |ui| component_row_menu(app, ui, m.id, i, &label, m.components.len()));
     }
 }
 

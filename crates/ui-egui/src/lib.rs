@@ -33,6 +33,7 @@ pub mod pick;
 pub mod print_view;
 pub mod recheck;
 pub mod region;
+pub mod reload;
 pub mod render;
 pub mod shortcuts;
 pub mod sidebar;
@@ -98,6 +99,8 @@ mod tests_grading;
 #[cfg(test)]
 mod tests_grid;
 #[cfg(test)]
+mod tests_guided_guides;
+#[cfg(test)]
 mod tests_info_dialogs;
 #[cfg(test)]
 mod tests_keymap;
@@ -140,6 +143,8 @@ mod tests_preview_limit;
 #[cfg(test)]
 mod tests_print;
 #[cfg(test)]
+mod tests_profile_menu;
+#[cfg(test)]
 mod tests_profiles_layout;
 #[cfg(test)]
 mod tests_quit_unsaved;
@@ -147,6 +152,8 @@ mod tests_quit_unsaved;
 mod tests_recheck;
 #[cfg(test)]
 mod tests_rename_person;
+#[cfg(test)]
+mod tests_rules_editor;
 #[cfg(test)]
 mod tests_sam_setup;
 #[cfg(test)]
@@ -623,8 +630,14 @@ impl LightcraftApp {
             None
         };
         let r = self.session.execute(id, &params).map_err(CommandError::from);
-        if let Ok(result) = &r {
-            panels::masking::selection_changed(self, id, &params, result, mask_history_before.as_deref());
+        match &r {
+            Ok(result) => panels::masking::selection_changed(self, id, &params, result, mask_history_before.as_deref()),
+            Err(error) if error.kind == lightcraft_engine::ErrorKind::NotSaved => {
+                // The edit and history already changed in memory. Keep the save error for the
+                // caller, while making row selection follow the document the user sees.
+                panels::masking::selection_changed(self, id, &params, &Value::Null, mask_history_before.as_deref());
+            }
+            Err(_) => {}
         }
         if r.is_ok() && matches!(id, "crop.aspect" | "crop.rotateAspect") {
             self.ui.crop_default_aspect = if id == "crop.aspect" && params.get("aspect").and_then(Value::as_str) == Some("original") {
@@ -645,6 +658,11 @@ impl LightcraftApp {
             // Judge local adjustments on the photo, without the selection overlay obscuring them.
             // Keep it hidden after release; O / the overlay eye can show it again.
             self.ui.mask_overlay = false;
+        }
+        if r.is_ok() && matches!(id, "mask.add" | "mask.addComponent" | "mask.duplicate" | "mask.select") {
+            // A new or newly picked mask shows its overlay again, as in Lightroom: hidden by a slider
+            // drag above, it stayed hidden while the Overlay menu still named a mode (issue #1800).
+            self.ui.mask_overlay = true;
         }
         if r.is_ok() {
             // These commands finish synchronously, so their completion would otherwise
@@ -704,7 +722,10 @@ impl LightcraftApp {
         if d.crop != lightcraft_develop::Crop::default() {
             return d.crop.aspect;
         }
-        match self.ui.crop_default_aspect.as_ref()? {
+        // nothing chosen yet: locked to the photo's own shape, as Lightroom starts (#991); one
+        // Lock toggle (remembered as "free") unlocks it for good
+        let remembered = self.ui.crop_default_aspect.clone().unwrap_or_else(|| Value::String("original".into()));
+        match &remembered {
             Value::String(s) if s == "original" => {
                 let p = self.session.catalog.photo(photo)?;
                 let (w, h) = (p.width.max(1).saturating_mul(100), p.height.max(1).saturating_mul(100));
@@ -723,11 +744,13 @@ impl LightcraftApp {
 
     /// Called only after a crop gesture begins, inside its undo transaction.
     pub(crate) fn begin_crop(&mut self) -> Result<(), String> {
+        // nothing chosen yet: the photo's own shape, as `crop_tool_aspect` shows it
+        let aspect = self.ui.crop_default_aspect.clone().unwrap_or_else(|| serde_json::json!("original"));
         if self.session.interaction.is_some()
             && self.session.active().and_then(|id| self.session.develop_of(id)).is_some_and(|d| d.crop == lightcraft_develop::Crop::default())
-            && let Some(aspect) = self.ui.crop_default_aspect.clone()
             && aspect != serde_json::json!("free")
-            && let Err(e) = self.session.execute("crop.aspect", &serde_json::json!({"aspect": aspect}))
+            // the remembered ratio, turned like the new photo's crop (as a named ratio is)
+            && let Err(e) = self.session.execute("crop.aspect", &serde_json::json!({"aspect": aspect, "orientation": "crop"}))
         {
             // A remembered value the command refuses (a hand-edited settings file) would refuse
             // every crop drag on an untouched photo: forget it and let this drag go ahead.
@@ -826,11 +849,16 @@ impl LightcraftApp {
     /// (`ui.detail_due`); watch the model download. Never waits for the model.
     fn ai_mask_detail(&mut self, ctx: &egui::Context) {
         let polled = self.session.segment_poll();
+        if let Some((photo, mask, component)) = polled.created {
+            panels::masking::selection_completed(self, photo, mask, component);
+        }
         let now = ctx.input(|i| i.time);
         if polled.changed {
             ctx.request_repaint();
         }
         if let Some(mask) = polled.refine {
+            // a new selection from a click or a description: show it, as `run` does for new masks
+            self.ui.mask_overlay = true;
             self.ui.detail_due = Some((now + 0.3, mask));
         }
         if let Some(e) = polled.messages.into_iter().last() {
@@ -1757,6 +1785,10 @@ impl Caches {
         let t = kept.unwrap_or_else(|| std::sync::Arc::new(cat.folder_tree()));
         self.folder_tree = Some((cat.revision, t.clone()));
         t
+    }
+    /// The folder tree as last built, when it still holds (a read-only check cannot rebuild it).
+    pub(crate) fn folder_tree_if_fresh(&self, cat: &lightcraft_catalog::Catalog) -> Option<std::sync::Arc<Vec<lightcraft_catalog::FolderNode>>> {
+        self.folder_tree.as_ref().filter(|(r, _)| still_right(cat, *r, READS_FILE)).map(|(_, t)| t.clone())
     }
     /// The library's keyword tree.
     pub fn keyword_tree(&mut self, cat: &lightcraft_catalog::Catalog) -> std::sync::Arc<Vec<lightcraft_catalog::KeywordNode>> {

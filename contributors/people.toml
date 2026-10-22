@@ -58,5 +58,12 @@ sync_github_name = false
 real_name = "Ege Gursel"
 sync_github_name = true
 
+[people.mahmatias]
+display_name = "Márcio Matias de Andrade"
+sync_github_name = true
+
+[people.ronibalthazar]
+sync_github_name = true
+
 [people.Hanmo123]
 sync_github_name = true
